@@ -61,7 +61,9 @@ is currently wedged mid-command-list at lines 17-22).
 - Pipe wire constants (`PIPE_VERSION 0x01`, `PIPE_FLAG_COMPRESSED 0x01`, `PIPE_FLAG_PARTIAL 0x02`,
   `PIPE_MAX_FRAME 244`, `OD_PIPE_MAX_PAYLOAD 244`), chunk/size constants (`CONFIG_CHUNK_SIZE 200`,
   `CONFIG_CHUNK_SIZE_WITH_PREFIX 202`, `MAX_CONFIG_CHUNKS 20`, `MAX_RESPONSE_DATA_SIZE 100`).
-- `OD_PROTOCOL_VERSION 2u` (bump on any wire-visible change).
+- Version macros `OD_PROTOCOL_VERSION_MAJOR 2u` / `OD_PROTOCOL_VERSION_MINOR 0u` /
+  `OD_PROTOCOL_VERSION_STR "2.0"`, governed by the VERSIONING POLICY in the header banner
+  (MAJOR = breaking wire change, MINOR = backward-compatible addition).
 
 **Stays OUT** (owned by each repo's `opendisplay_structs.h` / `opendisplay_constants.h`, which diverge):
 device-implementation constants (`PIPE_MAX_W`, reorder-slot sizes — per-target `#ifdef` in
@@ -158,7 +160,7 @@ a shared macro (would be a compile error). Dispatch (`EPD/EPD_service.c:618+`) r
 Build via `make`.
 
 **Step 5 — Sync lock-in.** Run `sync_protocol_header.py --check` across all four; wire it into each
-repo's CI / pre-commit. Commit per repo referencing `OD_PROTOCOL_VERSION 2` and the `0x82→0x83` move.
+repo's CI / pre-commit. Commit per repo referencing protocol `v2.0` and the `0x82→0x83` move.
 
 **Follow-up (tracked, not in this change-set):**
 - **OD App** — `BLE/ODConstants.swift:40` `case nfc = 0x0083` + label at :64; grep app + `Resources/ble-common.js`

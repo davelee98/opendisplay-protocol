@@ -9,7 +9,85 @@
  *   image PIPE. A new engineer or an AI agent should be able to implement a
  *   fully-correct client from THIS FILE ALONE, without reading firmware.
  *
- *   OD_PROTOCOL_VERSION == 2   (bump on ANY wire-visible change)
+ *   OD_PROTOCOL_VERSION 2.0   (MAJOR.MINOR; see VERSIONING POLICY below)
+ *   LAST CHANGED        2026-07-15
+ *
+ * --------------------------------------------------------------------------
+ * VERSIONING POLICY
+ * --------------------------------------------------------------------------
+ *   The version is MAJOR.MINOR and describes the SPEC in THIS file. It is a
+ *   compatibility / documentation marker and is NOT transmitted on the wire.
+ *   (The on-wire, negotiated PIPE_VERSION used by the 0x0080 sub-protocol is a
+ *   separate field, versioned independently.)
+ *
+ *   Bump MAJOR (x.0) for a BREAKING wire change -- one that makes a peer built
+ *   against the previous version misread bytes or lose interoperability:
+ *     - changing the value or meaning of an existing opcode, response/status
+ *       byte, auth state, or error code (e.g. the NFC 0x0082 -> 0x0083 move
+ *       that defines 2.0);
+ *     - changing an existing message's request/response layout, field size,
+ *       endianness, or a framing rule (opcode width, envelope, auth gating);
+ *     - removing or renumbering any existing command / response / error code.
+ *   Reset MINOR to 0 on every MAJOR bump.
+ *
+ *   Bump MINOR (2.x) for a BACKWARD-COMPATIBLE addition -- old peers keep
+ *   working unchanged, new peers gain capability:
+ *     - adding a NEW command opcode, response/status byte, error code, NFC
+ *       sub-command, or NFC record type that leaves existing ones untouched;
+ *     - appending a NEW optional, length-discriminated field to an existing
+ *       message that old parsers safely ignore;
+ *     - widening a documented limit / range in a compatible direction.
+ *
+ *   NO bump for changes that do not alter wire behavior -- comment / spec
+ *   clarifications, or adding an @targets entry when a firmware merely starts
+ *   implementing an already-defined opcode. Record those in git history and
+ *   reserve version bumps for real spec changes.
+ *
+ *   Rule of thumb -- "could a peer on the previous version misread the wire?"
+ *     yes                         -> MAJOR
+ *     no, but something new added -> MINOR
+ *     neither                     -> no bump
+ *
+ * --------------------------------------------------------------------------
+ * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
+ *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
+ * --------------------------------------------------------------------------
+ *   Unreleased (since 2.0)
+ *     - (none yet) Add each wire-spec change here as it lands. On the next
+ *       version bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.0  (2026-07-15)
+ *     - Initial shared protocol contract: one self-documenting header vendored
+ *       into all firmware repos (Firmware, NRF54, Silabs, NRF52811).
+ *     - BREAKING: NFC endpoint moved 0x0082 -> 0x0083 to resolve the collision
+ *       with CMD_PIPE_WRITE_END; clean cutover, no legacy alias. This move
+ *       defines the 2.x line.
+ *     - Union superset of every repo's commands / responses / auth states /
+ *       error codes, with per-opcode tagged spec blocks.
+ *     - Established MAJOR.MINOR versioning policy, this changelog, and the
+ *       LAST CHANGED field.
+ *     - Opcode-scoped, prefixed NACK error namespaces (OD_ERR_PARTIAL_* for
+ *       0x76, OD_ERR_PIPE_START_* for the 0x80 START, NFC_ERR_* for 0x83) and
+ *       the scoping rule that data[0] is always decoded in the scope of the
+ *       echoed opcode -- there is no global error enum, and byte values are
+ *       reused across namespaces with different meanings. Names/comments only;
+ *       no wire bytes change (these constants are new in 2.0, unconsumed).
+ *
+ * --------------------------------------------------------------------------
+ * AGENT INSTRUCTIONS -- changelog upkeep (perform on EVERY edit to this file)
+ * --------------------------------------------------------------------------
+ *   1. Set LAST CHANGED (top) to the date of your edit.
+ *   2. Add a bullet describing the change under "Unreleased (since x.y)".
+ *   3. Classify the change via the VERSIONING POLICY above: breaking => MAJOR,
+ *      backward-compatible addition => MINOR, doc-only => no bump.
+ *   4. VALIDATE before finishing: confirm the accumulated "Unreleased" entries
+ *      are consistent with OD_PROTOCOL_VERSION. If ANY entry is breaking, MAJOR
+ *      must be bumped; if any adds wire capability, at least MINOR must be
+ *      bumped. When a bump is warranted: update OD_PROTOCOL_VERSION_MAJOR /
+ *      _MINOR / _STR, add a new "MAJOR.MINOR (YYYY-MM-DD)" heading, move the
+ *      Unreleased entries beneath it (reset MINOR to 0 on a MAJOR bump), and
+ *      leave "Unreleased (since x.y)" empty.
+ *   5. Never delete or rewrite historical entries -- the changelog is append-only.
  *
  * CANONICAL LOCATION
  *   opendisplay-protocol/src/opendisplay_protocol.h
@@ -43,12 +121,23 @@
  *       [status][cmd_echo][data...]
  *     - status   : 0x00 = ACK (RESP_ACK)
  *                  0xFF = NACK (RESP_NACK); a NACK's data[0] is often an
- *                         error code (OD_ERR_* / NFC_ERR_* / handler-local).
+ *                         error code (OD_ERR_PARTIAL_* / OD_ERR_PIPE_START_* /
+ *                         NFC_ERR_* / handler-local).
  *                  0xFE = auth required (RESP_AUTH_REQUIRED); sent for any
  *                         gated command when security is on but no session.
  *     - cmd_echo : the LOW byte of the command (RESP_* mirror the low byte of
  *                  the matching CMD_*; e.g. CMD_CONFIG_WRITE 0x0041 echoes
  *                  RESP_CONFIG_WRITE 0x41).
+ *
+ *   NACK ERROR-CODE SCOPING RULE (READ THIS)
+ *     - The NACK error code in data[0] is ALWAYS interpreted in the SCOPE of the
+ *       echoed opcode (byte 1). There is deliberately NO single global error
+ *       enum: each opcode's handler owns its own prefixed namespace, so the same
+ *       byte value carries DIFFERENT meanings under different opcodes.
+ *     - Concrete overlap: a NACK byte 0x03 means OD_ERR_PARTIAL_RECT_OOB under a
+ *       0x76 NACK ([0xFF][0x76][0x03][0x00]) but OD_ERR_PIPE_START_SIZE_MISMATCH
+ *       under a 0x80 NACK ([0xFF][0x80][0x03][0x00]). Decode data[0] only after
+ *       you know byte 1. See SECTION 4 for the full per-opcode error namespaces.
  *     - Some frames are unsolicited device->host notifications (refresh
  *       success/timeout); they use the same [status][echo] shape.
  *
@@ -106,8 +195,12 @@
 #ifndef OPENDISPLAY_PROTOCOL_H
 #define OPENDISPLAY_PROTOCOL_H
 
-/* Wire-protocol revision. Bump on any change visible on the wire. */
-#define OD_PROTOCOL_VERSION            2u
+/* Wire-protocol revision, MAJOR.MINOR. See VERSIONING POLICY in the banner for
+ * when to bump which number. This marker describes the spec and is NOT sent on
+ * the wire (the negotiated 0x0080 PIPE_VERSION is a separate field). */
+#define OD_PROTOCOL_VERSION_MAJOR      2u
+#define OD_PROTOCOL_VERSION_MINOR      0u
+#define OD_PROTOCOL_VERSION_STR        "2.0"
 
 /* ==========================================================================
  * SECTION 1 -- COMMAND OPCODES (16-bit, big-endian on the wire)
@@ -277,7 +370,7 @@
  * @request:  [0x00][0x71][image_data...]  (chunk of the image / zlib stream)
  * @response: [0x00][0x71] (RESP_DIRECT_WRITE_DATA_ACK) per chunk.
  * @errors:   [0xFF][0x71] on write/decompress/overflow; for a partial (0x76)
- *            session the NACK data byte is an OD_ERR_* code.
+ *            session the NACK data byte is an OD_ERR_PARTIAL_* code.
  * @state:    must follow a 0x70 or 0x76 START; also carries partial-stream data.
  * @limits:   <= 230 bytes (unencrypted) / <= 154 (encrypted).
  * @targets:  Firmware | NRF54 | Silabs | NRF52811
@@ -332,10 +425,12 @@
  *            extension packs the same geometry LITTLE-endian instead). Remaining
  *            stream bytes follow via 0x71 DATA; the transfer ends with 0x72.
  * @response: [0x00][0x76] on accept (then 0x71 ACKs, then 0x72 END + 0x73/0x74).
- * @errors:   [0xFF][0x76][OD_ERR_*]:
- *              0x01 ETAG_MISMATCH, 0x03 RECT_OOB, 0x04 RECT_ALIGN,
- *              0x05 PARTIAL_FLAGS, 0x06 PARTIAL_STREAM, 0x07 PARTIAL_UNSUPPORTED.
- *            Any geometry/etag NACK clears the device's displayed_etag.
+ * @errors:   [0xFF][0x76][OD_ERR_PARTIAL_*][0x00]  (namespace scoped to 0x76):
+ *              0x01 OD_ERR_PARTIAL_ETAG_MISMATCH, 0x03 OD_ERR_PARTIAL_RECT_OOB,
+ *              0x04 OD_ERR_PARTIAL_RECT_ALIGN,     0x05 OD_ERR_PARTIAL_FLAGS,
+ *              0x06 OD_ERR_PARTIAL_STREAM,         0x07 OD_ERR_PARTIAL_UNSUPPORTED.
+ *            (0x02 unused.) Any geometry/etag NACK clears the device's
+ *            displayed_etag. See SECTION 4; do NOT emit OD_ERR_PIPE_START_* here.
  * @state:    requires 1bpp panel; x and width must be multiples of 8; old_etag
  *            must equal the currently displayed etag.
  * @limits:   START plaintext <= 200 bytes.
@@ -368,10 +463,16 @@
  *                        [max_frame:2 LE][resp_flags:1]
  *              resp_flags bit0 = selective-repeat supported, bit1 = partial
  *              accepted. Device echoes its negotiated maxima (min-rule applies).
- * @errors:   [0xFF][0x80][err][0x00] (handler-local, NOT OD_ERR_*):
- *              0x01 bad length/version, 0x02 unknown flag, 0x03 size mismatch,
- *              0x05 etag mismatch (partial), 0x06 partial unsupported,
- *              0x07 invalid rectangle (partial).
+ * @errors:   [0xFF][0x80][OD_ERR_PIPE_START_*][0x00]  (namespace scoped to the
+ *            0x80 START, DISTINCT from the 0x76 OD_ERR_PARTIAL_* set):
+ *              0x01 OD_ERR_PIPE_START_BAD_HEADER   (bad length or version),
+ *              0x02 OD_ERR_PIPE_START_UNKNOWN_FLAG,
+ *              0x03 OD_ERR_PIPE_START_SIZE_MISMATCH,
+ *              0x05 OD_ERR_PIPE_START_ETAG_MISMATCH        (partial),
+ *              0x06 OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED,
+ *              0x07 OD_ERR_PIPE_START_RECT_INVALID          (partial).
+ *            (0x04 unused.) See SECTION 4; do NOT emit OD_ERR_PARTIAL_* here --
+ *            0x03/0x05/0x06/0x07 mean different things in the two namespaces.
  * @state:    a new START aborts any in-flight transfer; seq resets to 0.
  * @limits:   window/ack_every 1..32; frame <= PIPE_MAX_FRAME (244).
  * @targets:  Firmware      (NOT NRF54, NOT Silabs, NOT NRF52811)
@@ -511,19 +612,58 @@
 #define AUTH_STATUS_ERROR              0xFFu   /* generic error */
 
 /* ==========================================================================
- * SECTION 4 -- PARTIAL-WRITE (0x76) NACK CODES  [0xFF][0x76][OD_ERR_*]
+ * SECTION 4 -- OPCODE-SCOPED NACK ERROR NAMESPACES
  * ==========================================================================
- * These name the partial-update (0x76 START / 0x71 DATA / 0x72 END) error
- * bytes. NOTE: the PIPE 0x80 START uses a DIFFERENT, handler-local numbering
- * (see CMD_PIPE_WRITE_START @errors) -- do not cross-apply these values there.
- * 0x02 is intentionally unused.
- * ========================================================================== */
-#define OD_ERR_ETAG_MISMATCH           0x01u
-#define OD_ERR_RECT_OOB                0x03u
-#define OD_ERR_RECT_ALIGN              0x04u
-#define OD_ERR_PARTIAL_FLAGS           0x05u
-#define OD_ERR_PARTIAL_STREAM          0x06u
-#define OD_ERR_PARTIAL_UNSUPPORTED     0x07u
+ * NACK error bytes are opcode-SCOPED, never global: data[0] of a NACK is only
+ * meaningful once you know the echoed opcode (byte 1). This section holds the
+ * distinct, PREFIXED error namespaces -- one per handler -- so a byte value can
+ * be reused with different meanings and stay unambiguous on the wire. The NFC
+ * namespace lives in SECTION 5 (NFC_ERR_*, the 4th byte of
+ * [0xFF][0x83][0xFF][err]); it is cross-referenced but NOT redefined here.
+ *
+ * SCOPING RULE
+ *   The 0x76 (OD_ERR_PARTIAL_*) and 0x80-START (OD_ERR_PIPE_START_*) sets below
+ *   DELIBERATELY REUSE byte values 0x03, 0x05, 0x06 and 0x07 with DIFFERENT
+ *   meanings. They must NEVER be cross-applied: the echoed opcode is the only
+ *   thing that disambiguates them. E.g. byte 0x03 == OD_ERR_PARTIAL_RECT_OOB
+ *   under a 0x76 NACK but OD_ERR_PIPE_START_SIZE_MISMATCH under a 0x80 NACK.
+ *
+ * IMPLEMENTATION GUIDANCE (for firmware handlers adopting these constants)
+ *   - A handler for CMD_PARTIAL_WRITE_START (0x76), and the 0x71/0x72 frames of
+ *     that partial session, MUST emit ONLY OD_ERR_PARTIAL_* codes.
+ *   - A handler for CMD_PIPE_WRITE_START (0x80) MUST emit ONLY
+ *     OD_ERR_PIPE_START_* codes.
+ *   - The NFC handler (CMD_NFC_ENDPOINT 0x83) MUST emit ONLY NFC_ERR_* codes
+ *     (SECTION 5).
+ *   A code from one namespace must NEVER appear in another handler's NACK. The
+ *   overlapping raw byte values are intentional and safe ONLY because the echoed
+ *   opcode scopes them -- pick the constant by which opcode you are answering.
+ * --------------------------------------------------------------------------
+ * 4a. PARTIAL-WRITE errors -- scope: CMD_PARTIAL_WRITE_START (0x76) and its
+ *     0x71 DATA / 0x72 END frames.  NACK frame: [0xFF][0x76][err][0x00].
+ *     (0x02 is intentionally unused in this set.)
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_PARTIAL_ETAG_MISMATCH   0x01u   /* old_etag != displayed etag */
+#define OD_ERR_PARTIAL_RECT_OOB        0x03u   /* rectangle out of panel bounds */
+#define OD_ERR_PARTIAL_RECT_ALIGN      0x04u   /* x / width not a multiple of 8 */
+#define OD_ERR_PARTIAL_FLAGS           0x05u   /* bad / unsupported flags */
+#define OD_ERR_PARTIAL_STREAM          0x06u   /* stream / length error */
+#define OD_ERR_PARTIAL_UNSUPPORTED     0x07u   /* partial write unsupported (e.g. not 1bpp) */
+
+/* --------------------------------------------------------------------------
+ * 4b. PIPE-START errors -- scope: CMD_PIPE_WRITE_START (0x80) ONLY.
+ *     NACK frame: [0xFF][0x80][err][0x00].  DISTINCT namespace from 4a: the
+ *     shared byte values (0x03/0x05/0x06/0x07) mean different things here.
+ *     (0x04 is unused in this set.)  Note: the in-flight 0x81 PIPE_WRITE_DATA
+ *     NACK carries its OWN handler-local err byte (see CMD_PIPE_WRITE_DATA
+ *     @response) and is not part of this START namespace.
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_PIPE_START_BAD_HEADER          0x01u   /* bad length or version */
+#define OD_ERR_PIPE_START_UNKNOWN_FLAG        0x02u   /* unknown flags bit set */
+#define OD_ERR_PIPE_START_SIZE_MISMATCH       0x03u   /* total_size inconsistent */
+#define OD_ERR_PIPE_START_ETAG_MISMATCH       0x05u   /* partial: old_etag mismatch */
+#define OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED 0x06u   /* partial mode not supported */
+#define OD_ERR_PIPE_START_RECT_INVALID        0x07u   /* partial: invalid rectangle */
 
 /* ==========================================================================
  * SECTION 5 -- NFC SUB-PROTOCOL (rides CMD_NFC_ENDPOINT 0x0083)
