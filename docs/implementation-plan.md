@@ -16,15 +16,19 @@ This change does two coordinated things:
    and **agent grounding**.
 
 ### Decisions (locked with user)
-- **Canonical home:** a new tiny spec-only repo `opendisplay-protocol` (recommended). Fallback: the
-  main `Firmware` repo. Low-risk either way — vendored copies + sync destinations are identical; only
-  the canonical path / push-origin differs.
+- **Canonical home:** the new spec-only repo **`davelee98/opendisplay-protocol`**, now **public**
+  (https://github.com/davelee98/opendisplay-protocol), cloned locally at
+  `/Users/davelee/Documents/OD/opendisplay-protocol`. Laid out with `src/` (canonical header) and
+  `docs/` (this plan + the opcode support matrix). The four vendored copies + sync destinations in the
+  firmware repos are identical to what they'd be anywhere; only the canonical path / push-origin lives
+  here.
 - **App scope:** firmware-only now; the OD App Swift change is a **tracked follow-up** (NFC has no UI
   caller yet, so nothing breaks in production; NFC stays non-functional end-to-end until the app PR).
 - **Cutover:** clean — NFC responds only on `0x0083`; old `0x0082` NFC frames are rejected. No alias.
 - **Combined `Firmware`:** header + `#include` only; keep the raw-hex `switch` as-is. Defer the
   literal→named refactor + `main.h` RESP dedup to a separate reviewed commit.
-- **Rollout:** branch + PR per repo (this is a wire-protocol change, not a chore).
+- **Rollout:** branch + PR per **firmware** repo (this is a wire-protocol change, not a chore). The
+  canonical `opendisplay-protocol` repo itself is committed directly to `main`.
 
 ### Key grounding correction (de-risks the cutover)
 The Silabs NFC handler (`Firmware_Silabs/opendisplay_pipe.c:841-994`) already builds **every** response
@@ -95,28 +99,36 @@ sub-status `0x82` ("chunk accepted") is unrelated to the opcode.
 **Vendored plain copy + sync script** (matches the no-submodules convention and the existing
 `tools/config_packet.py` duplication precedent across `Firmware` and `Firmware_NRF54`).
 
-- **Canonical:** `opendisplay-protocol/opendisplay_protocol.h` (new spec repo) + `tools/sync_protocol_header.py`
-  + a `README` that can embed the opcode matrix. (Fallback canonical: `Firmware/` — only the paths change.)
-- **`sync_protocol_header.py`:** `--push` copies canonical → each destination (below); `--check`
-  byte-compares and exits non-zero with a diff (the CI hook). Keep every copy **byte-identical** so
-  `--check` is a trivial hash compare.
+- **Canonical:** `opendisplay-protocol/src/opendisplay_protocol.h` (public spec repo) +
+  `opendisplay-protocol/tools/sync_protocol_header.py` + a `README` that can embed the opcode matrix.
+- **`sync_protocol_header.py`:** canonical source is `src/opendisplay_protocol.h`. `--push` copies
+  canonical → each destination (below); `--check` byte-compares and exits non-zero with a diff (the CI
+  hook). Keep every copy **byte-identical** so `--check` is a trivial hash compare.
 - **Destination map:**
   - `Firmware/include/opendisplay_protocol.h`  (PlatformIO default include path — zero config change)
   - `Firmware_NRF54/src/opendisplay_protocol.h`  (`${SRC_DIR}` already an include dir)
   - `Firmware_Silabs/opendisplay_protocol.h`  (repo root, `"../."` already an include dir)
   - `Firmware_NRF/opendisplay_protocol.h`  (`$(PROJECT_ROOT)` already in `INC_FOLDERS`)
-- **CI:** each firmware repo runs `sync_protocol_header.py --check` (or, if cross-repo checkout in CI is
-  awkward, an embedded SHA-256 check via a tiny per-repo `tools/check_protocol_header.sh`).
+- **CI:** because the canonical repo is **public**, each firmware repo's CI reads the canonical
+  `src/opendisplay_protocol.h` directly (a shallow `git checkout` of `opendisplay-protocol` or a fetch
+  of the raw URL) and runs `sync_protocol_header.py --check` against it — **no auth / deploy key / SHA
+  pinning required**. (Optional alternative: an embedded SHA-256 compare via a tiny per-repo
+  `tools/check_protocol_header.sh`.)
 - **Linkage:** macro-only ⇒ no `extern "C"` anywhere; banner records the rule for future edits.
 
 ---
 
 ## Part 3 — Per-repo migration (ordered; branch + PR each)
 
-**Step 0 — Canonical.** Create `opendisplay-protocol` repo: author `opendisplay_protocol.h` (Part 1),
-`tools/sync_protocol_header.py` (Part 2). Confirm py-opendisplay needs no change (no NFC; its `0x0082`
-stays `PIPE_WRITE_END` in `protocol/commands.py`); optionally add a check that its Python constants
-match the header.
+**Step 0 — Canonical.** The public `opendisplay-protocol` repo is **already initialized and its `main`
+pushed**; `docs/` already holds this plan (`implementation-plan.md`) and the opcode support matrix
+(`opcode-support-matrix.html`), and `src/` is scaffolded. Remaining: finish authoring
+`src/opendisplay_protocol.h` (Part 1, in progress now) and create `tools/sync_protocol_header.py`
+(Part 2). Unlike the firmware repos (branch + PR), the canonical `opendisplay-protocol` repo is
+committed **directly to `main`** (commit identity uses the GitHub noreply email
+`247393336+davelee98@users.noreply.github.com`). Confirm py-opendisplay needs no change (no NFC; its
+`0x0082` stays `PIPE_WRITE_END` in `protocol/commands.py`); optionally add a check that its Python
+constants match the header.
 
 **Step 1 — Firmware_NRF54.** Replace `src/opendisplay_protocol.h` with the vendored copy (drop-in: same
 guard/path). In `src/opendisplay_pipe.c` (dispatch at :1182+), `case CMD_NFC_ENDPOINT` auto-follows the
@@ -176,7 +188,7 @@ repo's CI / pre-commit. Commit per repo referencing `OD_PROTOCOL_VERSION 2` and 
   (proves the `EPD_service.h` dedup preserved values exactly).
 
 ## Critical files
-- `opendisplay-protocol/opendisplay_protocol.h` + `tools/sync_protocol_header.py` (new canonical)
+- `opendisplay-protocol/src/opendisplay_protocol.h` + `opendisplay-protocol/tools/sync_protocol_header.py` (canonical)
 - `Firmware_NRF54/src/opendisplay_protocol.h` (authoring base → replaced) + `src/opendisplay_pipe.c:1182+`
 - `Firmware_Silabs/opendisplay_protocol.h` (replaced); NFC handler `opendisplay_pipe.c:841-994` (verify symbolic)
 - `Firmware_NRF/EPD/EPD_service.h:67-122` (delete dup block, add include)
