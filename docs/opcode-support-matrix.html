@@ -1,0 +1,606 @@
+<title>OpenDisplay Wire Protocol — Opcode Support Matrix</title>
+<style>
+  :root {
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+
+    /* cool slate neutrals, biased toward the teal signal accent */
+    --bg:        #eef1f4;
+    --surface:   #ffffff;
+    --surface-2: #f6f8fa;
+    --ink:       #171d27;
+    --ink-soft:  #3c4657;
+    --muted:     #6a7484;
+    --faint:     #99a2b0;
+    --border:    #dfe4ea;
+    --border-2:  #cdd4dd;
+
+    --accent:      #0e7c86;
+    --accent-ink:  #0a5b63;
+
+    /* semantic state — kept distinct from the accent */
+    --good:      #1f9d57;
+    --good-soft: #e4f4ea;
+    --absent:    #aeb6c2;
+    --warn:      #b96411;   /* collision meaning A — NFC */
+    --warn-soft: #fbeddc;
+    --alt:       #5b52c9;   /* collision meaning B — PIPE END */
+    --alt-soft:  #e9e7fa;
+    --def:       #9a7b12;   /* defined-but-unhandled */
+    --def-soft:  #f6efd6;
+
+    --shadow: 0 1px 2px rgba(23,29,39,.04), 0 8px 24px -12px rgba(23,29,39,.18);
+    --radius: 14px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #0c0f15;
+      --surface:   #12161e;
+      --surface-2: #161b25;
+      --ink:       #e7ebf1;
+      --ink-soft:  #b8c0cd;
+      --muted:     #8b94a4;
+      --faint:     #5a6472;
+      --border:    #232a36;
+      --border-2:  #2e3644;
+
+      --accent:      #35c6d0;
+      --accent-ink:  #7fdce3;
+
+      --good:      #38c079;
+      --good-soft: #12291d;
+      --absent:    #4a525f;
+      --warn:      #e0972f;
+      --warn-soft: #2c2010;
+      --alt:       #9a90ff;
+      --alt-soft:  #1c1a33;
+      --def:       #d0ab3e;
+      --def-soft:  #26200e;
+
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px -16px rgba(0,0,0,.7);
+    }
+  }
+  /* viewer toggle must win in both directions */
+  :root[data-theme="light"] {
+    --bg:#eef1f4;--surface:#ffffff;--surface-2:#f6f8fa;--ink:#171d27;--ink-soft:#3c4657;
+    --muted:#6a7484;--faint:#99a2b0;--border:#dfe4ea;--border-2:#cdd4dd;
+    --accent:#0e7c86;--accent-ink:#0a5b63;--good:#1f9d57;--good-soft:#e4f4ea;--absent:#aeb6c2;
+    --warn:#b96411;--warn-soft:#fbeddc;--alt:#5b52c9;--alt-soft:#e9e7fa;--def:#9a7b12;--def-soft:#f6efd6;
+    --shadow:0 1px 2px rgba(23,29,39,.04),0 8px 24px -12px rgba(23,29,39,.18);
+  }
+  :root[data-theme="dark"] {
+    --bg:#0c0f15;--surface:#12161e;--surface-2:#161b25;--ink:#e7ebf1;--ink-soft:#b8c0cd;
+    --muted:#8b94a4;--faint:#5a6472;--border:#232a36;--border-2:#2e3644;
+    --accent:#35c6d0;--accent-ink:#7fdce3;--good:#38c079;--good-soft:#12291d;--absent:#4a525f;
+    --warn:#e0972f;--warn-soft:#2c2010;--alt:#9a90ff;--alt-soft:#1c1a33;--def:#d0ab3e;--def-soft:#26200e;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px -16px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: clamp(20px, 4vw, 56px) clamp(16px, 4vw, 40px) 72px;
+  }
+
+  /* ---------- header ---------- */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 18px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 26px; height: 2px;
+    background: var(--accent);
+    display: inline-block;
+  }
+  h1 {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: clamp(26px, 4.4vw, 40px);
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 14px;
+  }
+  h1 .hx { color: var(--accent); }
+  .lede {
+    max-width: 62ch;
+    color: var(--ink-soft);
+    font-size: clamp(15px, 1.6vw, 17px);
+    margin: 0 0 20px;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 30px;
+  }
+  .meta span {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 4px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  /* ---------- stat tiles ---------- */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 40px;
+  }
+  .tile {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .tile .n {
+    font-family: var(--font-mono);
+    font-size: 30px;
+    font-weight: 600;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .tile .l {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .tile.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
+  .tile.warn .n { color: var(--warn); }
+
+  /* ---------- section headings ---------- */
+  h2 {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    margin: 48px 0 16px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ---------- matrix ---------- */
+  .matrix-shell {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  table {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    font-size: 13px;
+  }
+  th, td {
+    padding: 0;
+    text-align: center;
+    vertical-align: middle;
+  }
+  thead .grp th {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 10px 4px 8px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  thead .grp .g-host { color: var(--accent-ink); }
+  thead .cols th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--surface-2);
+    border-bottom: 2px solid var(--border-2);
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink-soft);
+    padding: 12px 8px;
+    min-width: 92px;
+    white-space: nowrap;
+  }
+  thead .cols th.repo-code {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+  }
+  /* opcode corner + column, sticky-left */
+  .op-col {
+    position: sticky;
+    left: 0;
+    z-index: 4;
+    background: var(--surface);
+    text-align: left;
+    min-width: 208px;
+    max-width: 208px;
+    box-shadow: 1px 0 0 var(--border);
+  }
+  thead .op-col { z-index: 6; background: var(--surface-2); }
+  thead .grp .op-col { z-index: 6; }
+
+  tbody th.op-col {
+    padding: 11px 14px 11px 16px;
+  }
+  .op-code {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .op-name {
+    display: block;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: .02em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+  tbody tr { border-top: 1px solid var(--border); }
+  tbody td {
+    border-top: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+    padding: 9px 8px;
+  }
+  tbody tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  tbody tr:hover th.op-col { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+
+  /* status marks */
+  .mk {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+  }
+  .mk.yes  { color: var(--good); }
+  .mk.yes svg { width: 15px; height: 15px; }
+  .mk.lib  { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 0 7px; gap: 4px; }
+  .mk.lib svg { width: 12px; height: 12px; }
+  .mk.no   { color: var(--absent); }
+  .mk.def  { color: var(--def); background: var(--def-soft); padding: 0 8px; font-size: 10px; letter-spacing: .03em; }
+  .mk.nfc  { color: var(--warn); background: var(--warn-soft); padding: 0 9px; letter-spacing: .04em; }
+  .mk.pipe { color: var(--alt);  background: var(--alt-soft);  padding: 0 9px; letter-spacing: .04em; }
+  .fn { font-size: 9px; vertical-align: super; color: var(--muted); margin-left: 1px; font-family: var(--font-mono); }
+
+  /* collision row emphasis */
+  tr.collision td { background: color-mix(in srgb, var(--warn) 5%, transparent); }
+  tr.collision th.op-col {
+    background: var(--surface);
+    box-shadow: 1px 0 0 var(--border), inset 3px 0 0 var(--warn);
+  }
+  tr.collision:hover td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
+
+  /* ---------- legend ---------- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    margin: 16px 2px 0;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+  .legend div { display: flex; align-items: center; gap: 8px; }
+
+  .foot {
+    margin: 20px 2px 0;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+  .foot b { color: var(--ink-soft); font-weight: 600; }
+  .foot code, code {
+    font-family: var(--font-mono);
+    font-size: .92em;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 5px;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- cards ---------- */
+  .cards { display: grid; gap: 12px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .card.flag { border-left: 3px solid var(--warn); }
+  .card h3 {
+    margin: 0 0 6px;
+    font-size: 14.5px;
+    font-family: var(--font-sans);
+    font-weight: 600;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .card h3 .tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--warn);
+    background: var(--warn-soft);
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-weight: 600;
+  }
+  .card p { margin: 0; font-size: 13.5px; color: var(--ink-soft); line-height: 1.6; }
+  .card p + p { margin-top: 8px; }
+
+  /* ---------- per-repo notes ---------- */
+  .notes { display: grid; gap: 10px; }
+  .note {
+    display: grid;
+    grid-template-columns: 168px 1fr;
+    gap: 4px 18px;
+    padding: 13px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .note .repo {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--accent-ink);
+    align-self: start;
+  }
+  .note .repo .kind {
+    display: block;
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 500;
+    margin-top: 3px;
+  }
+  .note .body { font-size: 13px; color: var(--ink-soft); line-height: 1.6; }
+  @media (max-width: 560px) {
+    .note { grid-template-columns: 1fr; }
+  }
+
+  footer {
+    margin-top: 52px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--faint);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .tile, .card, .note, .matrix-shell { animation: rise .5s cubic-bezier(.2,.7,.3,1) backwards; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  }
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Wire Protocol Audit · OpenDisplay BLE</p>
+  <h1>Command Opcode Support Matrix <span class="hx">0x00–0x82</span></h1>
+  <p class="lede">
+    Every host&#8209;to&#8209;device command code across the OpenDisplay stack — which repo <em>sends</em> it, which firmware <em>handles</em> it, and where the same byte means two different things. Hosts issue commands; firmwares dispatch them.
+  </p>
+  <div class="meta">
+    <span>7 repositories</span>
+    <span>3 hosts · 4 firmwares</span>
+    <span>20 command opcodes</span>
+    <span>surveyed 2026-07-15</span>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><div class="n">20</div><div class="l">Distinct command opcodes in play</div></div>
+    <div class="tile"><div class="n">12</div><div class="l">Universal core — handled by every firmware &amp; host</div></div>
+    <div class="tile warn"><div class="n">1</div><div class="l">Hard collision — <code style="font-size:11px">0x0082</code> means two things</div></div>
+    <div class="tile"><div class="n">0</div><div class="l">Shared opcode definitions — each repo redeclares</div></div>
+  </div>
+
+  <h2>The matrix</h2>
+  <div class="matrix-shell">
+    <div class="scroll">
+      <table id="matrix" aria-label="Opcode support matrix">
+        <thead>
+          <tr class="grp">
+            <th class="op-col" rowspan="2"><span style="font-family:var(--font-sans);text-transform:none;letter-spacing:0;font-size:11px;color:var(--muted)">Opcode</span></th>
+            <th class="g-host" colspan="3">Hosts · send</th>
+            <th class="g-fw" colspan="4">Firmware · dispatch</th>
+          </tr>
+          <tr class="cols">
+            <th>OD App</th>
+            <th class="repo-code">py&#8209;opendisplay</th>
+            <th>home_assistant</th>
+            <th>Firmware</th>
+            <th class="repo-code">Firmware_NRF</th>
+            <th class="repo-code">Firmware_NRF54</th>
+            <th class="repo-code">Firmware_Silabs</th>
+          </tr>
+        </thead>
+        <tbody><!-- rendered by script --></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div><span class="mk yes"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg></span> Handled / sent (canonical)</div>
+    <div><span class="mk lib"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>lib</span> Via py&#8209;opendisplay</div>
+    <div><span class="mk no">—</span> Absent</div>
+    <div><span class="mk def">def¹</span> Defined, no handler</div>
+    <div><span class="mk nfc">NFC</span> Collision — meaning A</div>
+    <div><span class="mk pipe">PIPE&nbsp;END</span> Collision — meaning B</div>
+  </div>
+
+  <p class="foot">
+    <b>¹</b> <code>0x0044</code> is <code>#define</code>d in Firmware_NRF but has no dispatch case — falls through to “Unknown command” (<code>EPD/EPD_service.c:618</code>).
+    <b>²</b> Silabs <code>0x0051</code> reboots to the SiLabs OTA Apploader.
+    <b>³</b> nRF targets accept <code>0x0052</code> but deep&#8209;sleep is a no&#8209;op / log&#8209;and&#8209;drop (nRF54 sends no ACK).
+    <b>⁴</b> In OD App, LED / LED_STOP / BUZZER are sent only as bare 2&#8209;byte opcodes from the BLE Tester — no structured payload builder.
+  </p>
+
+  <h2>Collisions &amp; discrepancies</h2>
+  <div class="cards">
+    <div class="card flag">
+      <h3>The same byte forks the protocol <span class="tag">0x0082</span></h3>
+      <p><code>0x0082</code> is an <b>NFC endpoint</b> on OD App, Firmware_NRF54 and Firmware_Silabs — but a <b>PIPE_WRITE_END</b> (image-transfer terminator + refresh) on py&#8209;opendisplay, home_assistant and the combined Firmware. Firmware_NRF assigns it nothing. So one wire byte drives an NFC write on Silabs/nRF54 panels but <em>ends an image transfer</em> on ESP32/nRF52 panels — a genuine, load-bearing conflict, not just a naming clash.</p>
+    </div>
+    <div class="card flag">
+      <h3>PIPE_WRITE is combined-Firmware + py only <span class="tag">0x0080–0x0082</span></h3>
+      <p>Only py&#8209;opendisplay speaks the sliding-window START/DATA/END, and only the combined Firmware handles all three. Silabs, nRF54 and dedicated nRF have no pipe protocol — a host that streams via pipe to those targets gets “unknown command.” py&#8209;opendisplay gates the attempt on a config advertising bit and falls back to legacy <code>0x0070</code> direct-write.</p>
+    </div>
+    <div class="card flag">
+      <h3>Silently dropped on lean targets <span class="tag">0x0076 · 0x0077</span></h3>
+      <p><b>PARTIAL_WRITE_START</b> and <b>BUZZER</b> are sent by OD App + py/HA and handled by combined Firmware and nRF54, but not by dedicated nRF or Silabs — partial-region refresh and buzzer commands vanish there with no error.</p>
+    </div>
+    <div class="card">
+      <h3>Host / firmware mismatches <span class="tag">0x0044 · 0x0045</span></h3>
+      <p><b>READ_MSD</b> (<code>0x0044</code>) is issued by OD App and handled by three firmwares, but is <em>defined-but-unhandled</em> on dedicated nRF; py/HA read MSD from the advertisement instead of commanding it. <b>CONFIG_CLEAR</b> (<code>0x0045</code>) is a firmware-only extension on combined Firmware and nRF54 that <em>no host ever sends</em>.</p>
+    </div>
+    <div class="card">
+      <h3>Response codes overlap command space</h3>
+      <p><code>0x0073</code>/<code>0x0074</code> also serve as device→host refresh-complete / timeout responses. <code>0x0074</code> is never a host→device command in any repo, so it isn’t a matrix row — but the reuse is worth noting when reading raw traces.</p>
+    </div>
+  </div>
+
+  <h2>Per-repo dispatch</h2>
+  <div class="notes">
+    <div class="note">
+      <div class="repo">OD App<span class="kind">host · iOS</span></div>
+      <div class="body">Canonical <code>enum OD.Cmd: UInt16</code> (<code>BLE/ODConstants.swift:23</code>). The bundled JS engine <code>Resources/ble-common.js</code> <em>independently</em> hardcodes the same opcodes as hex strings — the numbers are declared twice. No PIPE_WRITE.</div>
+    </div>
+    <div class="note">
+      <div class="repo">py-opendisplay<span class="kind">host · python</span></div>
+      <div class="body">Canonical <code>class CommandCode(IntEnum)</code> (<code>protocol/commands.py:13</code>) with per-opcode <code>build_*_command</code> helpers. The only host that speaks the PIPE_WRITE sliding-window protocol.</div>
+    </div>
+    <div class="note">
+      <div class="repo">home_assistant<span class="kind">host · integration</span></div>
+      <div class="body">Defines no opcodes of its own — drives every BLE command through py&#8209;opendisplay’s <code>OpenDisplayDevice</code>. Its opcode support is exactly py&#8209;opendisplay’s.</div>
+    </div>
+    <div class="note">
+      <div class="repo">Firmware<span class="kind">fw · nRF52840 + ESP32</span></div>
+      <div class="body">No symbolic defines anywhere — raw 16-bit hex literals inside one dispatcher <code>imageDataWritten()</code> → <code>switch</code> at <code>communication.cpp:583</code>. Widest set; adds <code>0x0045</code> and the full PIPE_WRITE trio. <code>0x0082 = PIPE_WRITE_END</code>, zero NFC code.</div>
+    </div>
+    <div class="note">
+      <div class="repo">Firmware_NRF<span class="kind">fw · dedicated nRF</span></div>
+      <div class="body"><code>#define CMD_*</code> in <code>EPD/EPD_service.h:67</code>; single <code>switch</code> at <code>EPD_service.c:618</code>. Narrowest firmware — 13 defined, 12 handled. No LED_STOP, partial, buzzer, NFC or pipe.</div>
+    </div>
+    <div class="note">
+      <div class="repo">Firmware_NRF54<span class="kind">fw · nordic ncs</span></div>
+      <div class="body">Opcodes in <code>opendisplay_protocol.h:6</code>; <code>dispatch()</code> at <code>opendisplay_pipe.c:1178</code>. Handles NFC (<code>0x0082</code>), LED, buzzer, partial and <code>0x0045</code>; no PIPE_WRITE.</div>
+    </div>
+    <div class="note">
+      <div class="repo">Firmware_Silabs<span class="kind">fw · silabs bg22</span></div>
+      <div class="body"><code>CMD_*</code> in <code>opendisplay_protocol.h:6</code>; <code>switch</code> at <code>opendisplay_pipe.c:1011</code>. Config, firmware, MSD, auth, reboot, DFU-to-Apploader, EM4 deep-sleep, direct-write trio, LED activate/stop, and NFC. No partial, buzzer or pipe.</div>
+    </div>
+  </div>
+
+  <footer>
+    <span>OpenDisplay · BLE wire protocol</span>
+    <span>opcode collision on 0x0082 = load-bearing</span>
+  </footer>
+</div>
+
+<script>
+  // status codes: yes | lib | no | def | nfc | pipe   (+ optional footnote number)
+  var CHECK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>';
+  function cell(s, fn) {
+    var f = fn ? '<span class="fn">' + fn + '</span>' : '';
+    switch (s) {
+      case 'yes':  return '<span class="mk yes" title="handled / sent">' + CHECK + '</span>' + f;
+      case 'lib':  return '<span class="mk lib" title="via py-opendisplay">' + CHECK + 'lib</span>' + f;
+      case 'no':   return '<span class="mk no" title="absent">—</span>';
+      case 'def':  return '<span class="mk def" title="defined, no handler">def</span>' + f;
+      case 'nfc':  return '<span class="mk nfc" title="NFC endpoint">NFC</span>';
+      case 'pipe': return '<span class="mk pipe" title="PIPE_WRITE_END">PIPE&nbsp;END</span>' + (fn ? '<span class="fn">'+fn+'</span>' : '');
+      default:     return '';
+    }
+  }
+  // [code, name, [app, py, ha, fw, nrf, nrf54, silabs], collisionFlag]
+  // each entry is either 'status' or ['status','fnNumber']
+  var ROWS = [
+    ['0x000F','Reboot',        ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0040','Config Read',   ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0041','Config Write',  ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0042','Config Chunk',  ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0043','Firmware Ver',  ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0044','Read MSD',      ['yes','no','no','yes',['def','1'],'yes','yes']],
+    ['0x0045','Config Clear',  ['no','no','no','yes','no','yes','no']],
+    ['0x0050','Authenticate',  ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0051','Enter DFU',     ['yes','yes','lib','yes','yes','yes',['yes','2']]],
+    ['0x0052','Deep Sleep',    ['yes','yes','lib','yes',['yes','3'],['yes','3'],'yes']],
+    ['0x0070','Direct Write Start', ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0071','Direct Write Data',  ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0072','Direct Write End',   ['yes','yes','lib','yes','yes','yes','yes']],
+    ['0x0073','LED Activate',  [['yes','4'],'yes','lib','yes','yes','yes','yes']],
+    ['0x0075','LED Stop',      [['yes','4'],'no','no','yes','no','yes','yes']],
+    ['0x0076','Partial Write', ['yes','yes','lib','yes','no','yes','no']],
+    ['0x0077','Buzzer',        [['yes','4'],'yes','lib','yes','no','yes','no']],
+    ['0x0080','Pipe Write Start', ['no','yes','lib','yes','no','no','no']],
+    ['0x0081','Pipe Write Data',  ['no','yes','lib','yes','no','no','no']],
+    ['0x0082','NFC / Pipe End',   ['nfc','pipe',['pipe','L'],'pipe','no','nfc','nfc'], true]
+  ];
+  var tb = document.querySelector('#matrix tbody');
+  var html = '';
+  for (var i = 0; i < ROWS.length; i++) {
+    var r = ROWS[i], code = r[0], name = r[1], cells = r[2], coll = r[3];
+    html += '<tr class="' + (coll ? 'collision' : '') + '">';
+    html += '<th scope="row" class="op-col"><span class="op-code">' + code + '</span><span class="op-name">' + name + '</span></th>';
+    for (var c = 0; c < cells.length; c++) {
+      var v = cells[c], s, fn = '';
+      if (Array.isArray(v)) { s = v[0]; fn = v[1] === 'L' ? '' : v[1]; }
+      else { s = v; }
+      // home_assistant pipe-end shows as 'lib'-style via library; render as pipe with lib hint handled by title
+      html += '<td>' + cell(s, fn) + '</td>';
+    }
+    html += '</tr>';
+  }
+  tb.innerHTML = html;
+</script>
