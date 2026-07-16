@@ -46,7 +46,7 @@ speaker), no multi-pattern authoring in the compact form.
 | Service shape | **New sibling service `opendisplay.play_melody`**; `activate_buzzer` stays untouched (single-tone UX, zero automation breakage). |
 | YAML shape | **One compact string field** (`text` selector), `TOKEN[duration]` separated by whitespace/commas — not a list of dicts or pairs. |
 | Duration | Per-note, unambiguous marker: `:ms` (absolute) **or** `/frac[.|t]` (tempo-relative). Both may appear in one melody. |
-| Tempo | A `tempo` (BPM) service field; quarter-note ms = `60000 / bpm`. |
+| Tempo | A `tempo` (BPM) field; quarter-note ms = `60000 / bpm`. Optional `default_length` (RTTTL `d=`-style) sets the default fraction for unmarked notes; `default_note_ms` is the absolute fallback. |
 | Note fractions | **Powers of two** (`1`=whole, `2`=half, `4`=quarter, `8`=eighth, `16`, `32`), dotted `.` (×1.5), triplet `t` (×2/3). |
 | Parser location | **py-opendisplay** — `note_to_index()` + `BuzzerActivateConfig.melody()`, beside `hz_to_index()`/`single_tone()`. HA stays a thin pass-through. |
 | Multi-pattern | **Not exposed** in compact form; a rest token reproduces the inter-pattern gap. `\|` reserved for a future extension. |
@@ -91,7 +91,10 @@ Options weighed:
 - `notes` (required string, `text` selector)
 - `tempo` (BPM, e.g. 40–400, default 120) — only affects `/frac` durations
 - `repeats` (1–255, default 1) → wire `outer_repeat`
-- `default_note_ms` (5–1275, default 200) — duration for tokens with no marker
+- `default_note_ms` (5–1275, default 200) — absolute duration for unmarked tokens
+- `default_length` (fraction `1/2/4/8/16/32`, optional/unset) — RTTTL `d=`-style
+  default: if set, unmarked tokens use this note-fraction at `tempo` instead of
+  `default_note_ms` (e.g. `default_length: 4` → unmarked notes are quarters)
 
 The handler mirrors `_async_activate_buzzer` verbatim (same `_get_entry_for_device`
 / no-buzzers guard / `_raise_if_sleeping` / `_async_connect_and_run` plumbing);
@@ -156,11 +159,18 @@ Notes on the grammar:
 
 A note's duration is chosen per token:
 
-- **Omitted** → `default_note_ms` (absolute).
+- **Omitted** → the melody default: **`default_length`** at the current `tempo`
+  if that field is set (e.g. `default_length: 4` → a quarter note), otherwise
+  **`default_note_ms`** (absolute). Each default field is unit-named, so there is
+  no bare-number ambiguity about whether "4" means 4 ms or a quarter note.
 - **`:ms`** → that many milliseconds.
 - **`/frac`** → `whole_note_ms / frac`, where `whole_note_ms = 4 * 60000 / bpm`
   (so `/4` = one quarter = `60000/bpm` ms). `.` multiplies ×1.5; `t` multiplies
   ×2/3.
+
+An explicit per-note marker (`:ms` or `/frac`) always overrides both defaults.
+`default_length` accepts a plain fraction only; per-note dotted/triplet modifiers
+apply where written, not to the default.
 
 The resulting ms is converted to the firmware's **5 ms units** (`ms_to_units`,
 round-to-nearest, min 1 unit) and must fit `1..255` units (≤1275 ms). Durations
@@ -293,7 +303,7 @@ payload `01 01 03 78 28 00 0A 90 28`; with the `00 77 00` prefix →
 frame **`0077000101037828000A9028`** — bit-identical to reference §7.2 (bench T1,
 A4·rest·A5).
 
-**Tempo-relative, "Twinkle" opening** (`default` unused, explicit fractions):
+**Tempo-relative, "Twinkle" opening** (explicit fractions):
 
 ```yaml
 data:
@@ -303,6 +313,17 @@ data:
 At 120 BPM a quarter = 500 ms = 100 units (`0x64`), a half = 1000 ms = 200 units
 (`0xC8`). C5=126, G5=140, A5=144 →
 payload `01 01 07 7E64 7E64 8C64 8C64 9064 9064 8CC8`.
+
+**Same tune, terser via `default_length`** — unmarked notes default to quarters,
+only the final half-note carries a marker:
+
+```yaml
+data:
+  tempo: 120
+  default_length: 4        # unmarked notes are quarters
+  notes: "C5 C5 G5 G5 A5 A5 G5/2"
+```
+Compiles to the identical payload as above.
 
 **Triplet figure:**
 
@@ -334,11 +355,6 @@ notes ≈ 495 ms ≈ one quarter (the 5 ms rounding note, §5.3).
 
 ## 11. Open questions / follow-ups
 
-- **Default duration in tempo mode.** Today an unmarked token uses
-  `default_note_ms` (absolute) even when a `tempo` is set. RTTTL instead has a
-  fractional default (`d=4`). If tempo-mode melodies commonly omit per-note
-  durations, consider adding a `default_length` fraction field so unmarked tokens
-  inherit a *relative* default. Deferred — start with `default_note_ms` only.
 - **RTTTL importer.** Optional, secondary; auto-detect by header or a separate
   field/helper. Not part of the first implementation.
 - **General tuplets** (quintuplets, etc.) via an explicit `/8:3:2`
