@@ -10,7 +10,7 @@
  *   fully-correct client from THIS FILE ALONE, without reading firmware.
  *
  *   OD_PROTOCOL_VERSION 2.0   (MAJOR.MINOR; see VERSIONING POLICY below)
- *   LAST CHANGED        2026-07-15
+ *   LAST CHANGED        2026-07-16
  *
  * --------------------------------------------------------------------------
  * VERSIONING POLICY
@@ -53,8 +53,11 @@
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
  *   Unreleased (since 2.0)
- *     - (none yet) Add each wire-spec change here as it lands. On the next
- *       version bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *     - Doc-only: LANGUAGE / LINKAGE RULE now requires macro VALUES to stay
+ *       simple (literal or reference to a prior macro) so the header stays
+ *       parseable by tools/gen_python_protocol.py. No wire bytes change; no bump.
+ *     - Add each further wire-spec change here as it lands. On the next version
+ *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
  *   2.0  (2026-07-15)
  *     - Initial shared protocol contract: one self-documenting header vendored
@@ -107,6 +110,12 @@
  *   functions here -- those are per-repo and belong in opendisplay_structs.h /
  *   opendisplay_constants.h. Keep the include guard OPENDISPLAY_PROTOCOL_H so
  *   the vendored copies are drop-in replacements.
+ *   KEEP MACRO VALUES SIMPLE: an integer literal (0x...u / ...u), a string
+ *   literal, or a reference to a macro already defined above. No expressions
+ *   (e.g. `(1u << 3)`), casts, or multi-token values. This keeps the header
+ *   parseable by tools/gen_python_protocol.py, which mirrors these constants
+ *   into src/opendisplay_protocol.py (the Python single-source equivalent of
+ *   the byte-for-byte firmware vendoring) and hard-errors on any other shape.
  *
  * --------------------------------------------------------------------------
  * UNIVERSAL FRAMING
