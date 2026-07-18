@@ -197,7 +197,8 @@ from the firmware survey):
   others see `reserved[14]`.
 
 Already byte-identical everywhere (canonicalize as-is): `LedConfig`, `DataBus`,
-`SecurityConfig`, `TouchController`, `PassiveBuzzerConfig`, `FlashConfig`, `DataExtended`,
+`SecurityConfig`, `TouchController`, `BuzzerConfig` (canonical name; firmware still
+`PassiveBuzzerConfig` until migrated), `FlashConfig`, `DataExtended`,
 `WifiConfig`, `NfcConfig`.
 
 **Enum / constant naming drift to settle:**

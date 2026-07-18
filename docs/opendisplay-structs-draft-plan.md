@@ -79,7 +79,7 @@ Wire size = payload size after the 2-byte `SinglePacketHeader`. All packed.
 | 0x26 | wifi_config | `WifiConfig` | 160 | no | identical (Firmware + NRF54; yaml). **§6 Q6 resolved — server fields promoted out of `reserved[]`:** `ssid[32]`, `password[32]`, `encryption_type`, `server_host[64]` @65, `server_port:u16 **@endian be**` @129, `reserved[29]` @131. Header is ahead of current firmware (was comment-only); backward-compatible carve of former reserved bytes. |
 | 0x27 | security_config | `SecurityConfig` | 64 | no | identical everywhere |
 | 0x28 | touch_controller | `TouchController` | 32 | yes (4) | identical (Firmware, NRF54, yaml; Silabs skips by size) |
-| 0x29 | passive_buzzer | `PassiveBuzzerConfig` | 32 | yes (4) | identical (Firmware, NRF54, yaml); packet-type macro NAME diverges — §3.7 |
+| 0x29 | passive_buzzer (yaml) → buzzer | `BuzzerConfig` | 32 | yes (4) | identical layout; canonical name resolved to `OD_PKT_BUZZER`/`BuzzerConfig` (BUZZER) — §3.7 |
 | 0x2A | nfc_config | `NfcConfig` | 32 | yes (2) | identical (Silabs, NRF54, yaml) |
 | 0x2B | flash_config | `FlashConfig` | 32 | yes (2) | identical everywhere present |
 | 0x2C | data_extended | `DataExtended` | 288 | no | identical (9 × 32-byte NUL-terminated zero-padded UTF-8 strings; tag `@doc "text"` per field) |
@@ -135,7 +135,7 @@ tagged enum, matching whichever form codegen settles on — draft uses `#define 
 | `TouchFlags` | `TouchController.flags` | 0 INVERT_X, 1 INVERT_Y, 2 SWAP_XY, 3–7 reserved |
 | `NfcFlags` | `NfcConfig.flags` | 0 ENABLED, 1–7 reserved |
 | `FlashFlags` | `FlashConfig.flags` | 0 ENABLED, 1–7 reserved |
-| `BuzzerFlags` | `PassiveBuzzerConfig.flags` | 0 ENABLE_ACTIVE_HIGH, 1–7 reserved |
+| `BuzzerFlags` | `BuzzerConfig.flags` | 0 ENABLE_ACTIVE_HIGH, 1–7 reserved |
 
 ### 1e. Non-TLV wire payload structs (message payloads + advertisement)
 
@@ -161,7 +161,7 @@ comment-documented in protocol.h.
 The buzzer 0x0077 pattern payload is variable-length (`[instance][outer_repeats]
 [n_patterns]` then per-pattern `n_steps` + n_steps × (`freq:u8`,`duration:u8`)) —
 stays comment-only in protocol.h; add a `@doc` cross-reference from
-`PassiveBuzzerConfig`.
+`BuzzerConfig`.
 
 **Inventory totals:** 15 config TLV structs + 2 framing structs + 9 message/adv
 structs = **26 packed structs** (`MsdStatusBits` is a `@bits` group, not a struct —
@@ -195,7 +195,7 @@ see §6 Q5.)
 | `LedFlashPattern` layout; `legacy_tagtype`; `communication_modes` bit1 `OEPL` | **OEPL (OpenEPaperLink)** heritage | The 12-byte LED flash layout and the legacy tag-type field reproduce OEPL conventions for compatibility. | Canonical here (OD owns its wire), with `@doc "OEPL-compatible layout"` so nobody 'fixes' the odd nibble packing. |
 
 Also intentionally external-and-out: silicon-specific pin *encodings* (e.g. NRF54's
-`(port<<4)|pin` GPIO convention noted on `PassiveBuzzerConfig.drive_pin`, Silabs
+`(port<<4)|pin` GPIO convention noted on `BuzzerConfig.drive_pin`, Silabs
 `0xPN`) — the wire field is a raw u8; the encoding is target-defined. Add a single
 banner sentence, not per-field tags.
 
@@ -268,7 +268,10 @@ shrinks; total sizes never change. Offsets below are payload-relative (after the
      the screen on boot is why no boot text appears) so the two names are never read as
      different flags.
    - `CONFIG_PKT 0x29`: `BUZZER` (Silabs) vs `PASSIVE_BUZZER` (NRF54, yaml).
-     → Canonical: **`OD_PKT_PASSIVE_BUZZER`**.
+     → **RESOLVED — canonical is `OD_PKT_BUZZER` / `struct BuzzerConfig` (BUZZER,
+     matching Silabs).** config.yaml's packet name `passive_buzzer` is regenerated to
+     `buzzer`; the `@doc` records the former split. (The device is still a passive
+     piezo buzzer — noted in prose — but the wire name is BUZZER.)
 8. **`ColorScheme` value 7 — RESOLVED (2026-07-18): 7 = `SEVEN_COLOR` ("7color")**.
    config.yaml's `7color` is canonical (it is shipped in the website UI). The
    firmware `COLOR_SCHEME_GRAY8 = 7` and epaper-dithering `Grayscale8 = 7` were a
@@ -287,7 +290,7 @@ shrinks; total sizes never change. Offsets below are payload-relative (after the
     yaml. Firmware behavior is shipped → canonical names the bits; regenerated
     yaml inherits them.
 11. **Already identical everywhere** (canonicalize as-is, zero risk): `LedConfig`,
-    `DataBus`, `SecurityConfig`, `TouchController`, `PassiveBuzzerConfig`,
+    `DataBus`, `SecurityConfig`, `TouchController`, `BuzzerConfig`,
     `NfcConfig`, `FlashConfig`, `DataExtended`.
 12. **`WifiConfig`** — identical across all sources today (all `reserved[95]`), but
     the canonical draft **intentionally extends** it: per §6 Q6 the server
@@ -343,7 +346,7 @@ protocol.h's banner to state explicitly:
 | 1 | Config transfer framing: `OuterPacketHeader`, `SinglePacketHeader`, CRC constants, `OD_CONFIG_VERSION` | `@packet` (framing), `@doc`, `@endian` |
 | 2 | `ConfigPacketType` enum (15 ids). Per-packet `required`/`repeatable(max)` are carried as `@required`/`@repeatable` tags on each struct in §4, not a separate comment table | `@enum`, `@doc` |
 | 3 | Shared scalar constants: `OD_PIN_UNUSED`, `ActiveLevel` | `@doc` |
-| 4 | Per-packet blocks, in packet-id order. Each block = its enums, then its `@bits` groups, then the packed struct + size assert (system → manufacturer → power → display → led → sensor → data_bus → binary_inputs → wifi → security → touch → passive_buzzer → nfc → flash → data_extended) | `@packet`, `@required`, `@repeatable`, `@enum`, `@bits`, `@endian`, `@reserved`, `@unit`, `@min/@max/@default`, `@since`, `@doc` |
+| 4 | Per-packet blocks, in packet-id order. Each block = its enums, then its `@bits` groups, then the packed struct + size assert (system → manufacturer → power → display → led → sensor → data_bus → binary_inputs → wifi → security → touch → buzzer → nfc → flash → data_extended) | `@packet`, `@required`, `@repeatable`, `@enum`, `@bits`, `@endian`, `@reserved`, `@unit`, `@min/@max/@default`, `@since`, `@doc` |
 | 5 | External-related enum annex: `PanelIC`, `ColorScheme` (kept adjacent to §4 display block or inline there — draft choice; inline preferred, with `@external` notes) | `@enum`, `@external`, `@doc` |
 | 6 | Message payload structs (pipe, partial, auth, LED flash) | `@message`, `@endian` (incl. struct-level `be` on `PartialWriteStartHeader`) |
 | 7 | MSD advertisement: `MsdAdvertisement` + `MsdStatusBits` + dynamic-area index conventions | `@bits`, `@doc` |

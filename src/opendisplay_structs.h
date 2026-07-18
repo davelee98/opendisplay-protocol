@@ -308,7 +308,7 @@ enum ConfigPacketType {
     OD_PKT_WIFI           = 0x26, /**< @doc "wifi_config (singleton)" */
     OD_PKT_SECURITY       = 0x27, /**< @doc "security_config (singleton)" */
     OD_PKT_TOUCH          = 0x28, /**< @doc "touch_controller (repeatable, max 4)" */
-    OD_PKT_PASSIVE_BUZZER = 0x29, /**< @doc "passive_buzzer (repeatable, max 4). Canonical name resolves the Silabs BUZZER vs NRF54/yaml PASSIVE_BUZZER split." */
+    OD_PKT_BUZZER         = 0x29, /**< @doc "buzzer (repeatable, max 4). Canonical name is BUZZER (matches Silabs), resolving the Silabs BUZZER vs NRF54/yaml PASSIVE_BUZZER split; config.yaml's packet name (passive_buzzer) is regenerated to buzzer." */
     OD_PKT_NFC            = 0x2A, /**< @doc "nfc_config (repeatable, max 2)" */
     OD_PKT_FLASH          = 0x2B, /**< @doc "flash_config (repeatable, max 2)" */
     OD_PKT_DATA_EXTENDED  = 0x2C  /**< @doc "data_extended (singleton)" */
@@ -915,19 +915,19 @@ struct TouchController {
 OD_STATIC_ASSERT(sizeof(struct TouchController) == 32, "TouchController wire size");
 
 /* -----------------------------------------------------------------------
- * 0x29  passive_buzzer
+ * 0x29  buzzer  (config.yaml packet name: passive_buzzer)
  * ----------------------------------------------------------------------- */
 
-/* PassiveBuzzerConfig.flags @bits BuzzerFlags (bits 1-7 reserved). */
+/* BuzzerConfig.flags @bits BuzzerFlags (bits 1-7 reserved). */
 #define OD_BUZZER_FLAG_ENABLE_ACTIVE_HIGH (1u << 0) /* @doc "enable pin is active-high when set; otherwise active-low" */
 
-/** @struct PassiveBuzzerConfig  @packet 0x29  @repeatable max=4
- *  @doc "Passive piezo buzzer (PWM). Up to 4 instances. 32 bytes. The tone
+/** @struct BuzzerConfig  @packet 0x29  @repeatable max=4
+ *  @doc "Buzzer (passive piezo, PWM-driven). Up to 4 instances. 32 bytes. The tone
  *  PATTERN is not stored here -- it is carried variable-length by CMD_BUZZER
  *  0x0077 ([instance][outer_repeats][n_patterns] then per-pattern n_steps x
  *  (freq:u8, duration:u8)); that payload stays prose-documented in
  *  opendisplay_protocol.h (it is variable-length, so not modeled as a struct)." */
-struct PassiveBuzzerConfig {
+struct BuzzerConfig {
     uint8_t instance_number; /**< @doc "0-based buzzer-block index." */
     uint8_t drive_pin;       /**< @doc "GPIO driving the PWM / square wave into the buzzer (via transistor). Pin encoding is target-defined (e.g. nRF54 (port<<4)|pin)." */
     uint8_t enable_pin;      /**< @doc "optional enable (e.g. FET); 0xFF = unused." @default 0xFF */
@@ -935,7 +935,7 @@ struct PassiveBuzzerConfig {
     uint8_t duty_percent;    /**< @min 1 @max 100 @doc "PWM duty cycle; 0 = default 50." */
     uint8_t reserved[27];    /**< @reserved @doc "future use (incl. internal frequency/time scaling); must be 0." */
 } __attribute__((packed));
-OD_STATIC_ASSERT(sizeof(struct PassiveBuzzerConfig) == 32, "PassiveBuzzerConfig wire size");
+OD_STATIC_ASSERT(sizeof(struct BuzzerConfig) == 32, "BuzzerConfig wire size");
 
 /* -----------------------------------------------------------------------
  * 0x2A  nfc_config
