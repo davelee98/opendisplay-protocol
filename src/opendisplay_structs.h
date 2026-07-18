@@ -67,6 +67,11 @@
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
  *   Unreleased (since 2.0)
+ *     - Doc-only: fixed two comment shapes the codegen parser mis-read and added
+ *       the CODEGEN AUTHORING RULES banner section to prevent recurrence. Split the
+ *       combined BusFlags/PinBitmap @bits comment into one comment per group; folded
+ *       OuterPacketHeader's trailing FOLLOWUP note inside its @doc quote. No wire
+ *       change; regenerated the language mirrors.
  *     - Named the skipped/reserved bits inside two bitfield groups with explicit
  *       placeholder macros (no wire change; these bits stay reserved-must-be-0):
  *       TransmissionModes bit5/bit6 -> OD_TRANSMISSION_MODE_RESERVED_5/_6;
@@ -200,6 +205,34 @@
  *   @width <bytes>      intended on-wire width of an enum
  *   @external <comp>    enum mirrors / relates to an outside component
  *   @doc "<text>"       human prose (also the primary deliverable of this file)
+ *
+ * --------------------------------------------------------------------------
+ * CODEGEN AUTHORING RULES  (AGENT INSTRUCTIONS -- keep tools/structs_model.py able
+ * to parse this file; the stdlib parser hard-errors or MIS-ATTRIBUTES on anything
+ * outside this shape, and the Python/JS/... mirrors are GENERATED from here)
+ * --------------------------------------------------------------------------
+ *   A. One shape per construct, one declaration per line (no `uint8_t a, b;`):
+ *        - enum Name { OD_X = <int literal>, ... };   explicit values, OD_-prefixed.
+ *        - struct Name { <uintN_t> f; <uintN_t> f[<int literal>]; ... }
+ *              __attribute__((packed));   fixed-width scalars/arrays ONLY -- NO C
+ *              bitfields (uint8_t x:3), unions, nested structs, or macro-sized arrays.
+ *        - #define OD_..._NAME (1u << N)   for bit flags (mask/shift consts allowed).
+ *   B. Every packed struct ENDS with OD_STATIC_ASSERT(sizeof(struct X) == N, ...);
+ *      the parser sums the field widths and validates them against N -- that assert
+ *      IS the layout oracle (it replaces a compiler front-end). Keep it exact.
+ *   C. Each @bits group gets its OWN group comment. Do NOT describe two @bits groups
+ *      in one comment block: the parser attaches one comment per group, so a shared
+ *      block mis-labels the later group. (Regression fixed 2026-07-18.)
+ *   D. ALL prose that must reach the generated docs goes INSIDE the `@doc "..."`
+ *      quotes. Text AFTER the closing quote (trailing notes, `FOLLOWUP:` lines) is
+ *      DROPPED by the parser -- fold such notes into the quoted @doc. (Fixed 2026-07-18.)
+ *   E. Never redeclare a name opendisplay_protocol.h `#define`s; bind fields to it
+ *      with @enum instead (see LANGUAGE / LINKAGE RULE above).
+ *   F. AFTER ANY EDIT to values/layout/docs, regenerate the mirrors and confirm no
+ *      drift (do this in the same change, like protocol.h's gen tools):
+ *        python3 tools/gen_python_structs.py --write   # then commit the .py
+ *        python3 tools/gen_python_structs.py --check    # CI gate; exit 1 on drift
+ *      (add the same for future JS/Swift emitters as they land).
  * ========================================================================== */
 
 #ifndef OPENDISPLAY_STRUCTS_H
@@ -267,11 +300,11 @@
 
 /** @packet outer  @doc "Wraps the whole transfer: a length+version header, then a
  *  sequence of single_packet entries, then a trailing CRC (NOT part of this
- *  struct -- it is the last 2 bytes of the outer packet)."
- *  FOLLOWUP: `length` is populated inconsistently (toolbox patches it to the real
- *  total incl. CRC; some encoders leave it a zero pad -> [00 00][version]...). The
- *  CRC is always computed as if `length` were 0x0000. Verify whether any receiver
- *  relies on `length` before firmware depends on it. */
+ *  struct -- it is the last 2 bytes of the outer packet). FOLLOWUP: `length` is
+ *  populated inconsistently (the website toolbox patches it to the real total incl.
+ *  CRC; some encoders leave it a zero pad -> [00 00][version]...). The CRC is always
+ *  computed as if `length` were 0x0000. Verify whether any receiver relies on
+ *  `length` before firmware depends on it." */
 struct OuterPacketHeader {
     uint16_t length;  /**< @endian le @doc "total outer-packet length INCLUDING the trailing CRC. Inconsistently populated -- may be a real total or a zero pad; the CRC is computed as if this were 0x0000 either way." */
     uint8_t  version; /**< @enum OD_CONFIG_VERSION @doc "config-format MAJOR version = OD_CONFIG_VERSION (1). The minor is not carried in the header." */
@@ -757,8 +790,9 @@ enum BusType {
     OD_BUS_TYPE_SPI = 2  /**< @doc "SPI bus" */
 };
 
-/* DataBus.bus_flags @bits BusFlags -- all bits reserved today (must be 0).
- * DataBus.pullups / .pulldowns @bits PinBitmap: bit N-1 = pin N (pin_1..pin_7);
+/* DataBus.bus_flags @bits BusFlags -- all bits reserved today (must be 0). */
+
+/* DataBus.pullups / .pulldowns @bits PinBitmap: bit N-1 = pin N (pin_1..pin_7);
  * bit 7 reserved. See the PinBitmap convention note above BinaryInputs. */
 
 /** @struct DataBus  @packet 0x24  @repeatable max=4
