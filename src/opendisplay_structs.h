@@ -67,8 +67,12 @@
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
  *   Unreleased (since 2.0)
- *     - (none yet) Add each payload-layout change here as it lands. On the next
- *       version bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *     - Named the skipped/reserved bits inside two bitfield groups with explicit
+ *       placeholder macros (no wire change; these bits stay reserved-must-be-0):
+ *       TransmissionModes bit5/bit6 -> OD_TRANSMISSION_MODE_RESERVED_5/_6;
+ *       MsdStatusBits bit3 -> OD_MSD_STATUS_RESERVED_3. Documentation only.
+ *     - Add each payload-layout change here as it lands. On the next version bump,
+ *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
  *   2.0  (2026-07-18)
  *     - Initial canonical shared payload contract: the wire-payload counterpart
@@ -637,12 +641,15 @@ enum PanelIC {
     OD_PANEL_IC_ED103TC2_1872X1404_4GRAY = 3001 /**< @doc "same panel as 3000; 4bpp (16-level)" */
 };
 
-/* DisplayConfig.transmission_modes @bits TransmissionModes (bits 5-6 reserved). */
+/* DisplayConfig.transmission_modes @bits TransmissionModes (bits 5-6 reserved --
+ * named as placeholders below; bit7 is defined above the gap). */
 #define OD_TRANSMISSION_MODE_STREAMING_DECOMPRESSION (1u << 0) /* @doc "streaming zlib inflate, 512-byte DEFLATE window (requires zip). Canonical name resolves the Firmware/Silabs ZIPXL vs NRF54/yaml streaming_decompression split." */
 #define OD_TRANSMISSION_MODE_ZIP                     (1u << 1) /* @doc "zip-compressed transfer (full window)" */
 #define OD_TRANSMISSION_MODE_G5                      (1u << 2) /* @doc "Group 5 compression (not yet implemented)" */
 #define OD_TRANSMISSION_MODE_DIRECT_WRITE            (1u << 3) /* @doc "direct-write mode (bufferless)" */
 #define OD_TRANSMISSION_MODE_PIPE_WRITE              (1u << 4) /* @doc "PIPE-write mode: faster transfer via sliding-window pipeline" */
+#define OD_TRANSMISSION_MODE_RESERVED_5              (1u << 5) /* @reserved @doc "reserved; must be 0 (placeholder name for a future transmission mode)" */
+#define OD_TRANSMISSION_MODE_RESERVED_6              (1u << 6) /* @reserved @doc "reserved; must be 0 (placeholder name for a future transmission mode)" */
 #define OD_TRANSMISSION_MODE_CLEAR_ON_BOOT           (1u << 7) /* @doc "Clear screen on boot. Synonymous with config.yaml's no_boot_text / NO_BOOT_TEXT -- same bit, same behavior (clearing on boot is why no boot text shows)." */
 
 /** @struct DisplayConfig  @packet 0x20  @repeatable max=4
@@ -1180,7 +1187,7 @@ OD_STATIC_ASSERT(sizeof(struct AuthProof) == 32, "AuthProof wire size");
 #define OD_MSD_STATUS_BATTERY_VOLTAGE_BIT8 (1u << 0) /* @doc "high bit of the 10-bit battery voltage (units of 10 mV); combine with battery_voltage_low" */
 #define OD_MSD_STATUS_REBOOT_FLAG          (1u << 1) /* @doc "device rebooted since last read" */
 #define OD_MSD_STATUS_CONNECTION_REQUESTED (1u << 2) /* @doc "device is requesting a connection" */
-/* bit 3 reserved. */
+#define OD_MSD_STATUS_RESERVED_3           (1u << 3) /* @reserved @doc "reserved; must be 0 (placeholder name for a future status flag; sits between the flags and the bits 4-7 counter)" */
 #define OD_MSD_STATUS_MAIN_LOOP_COUNTER_SHIFT 4u     /* @doc "bits 4-7: free-running main-loop nibble counter (liveness)" */
 #define OD_MSD_STATUS_MAIN_LOOP_COUNTER_MASK  0xF0u  /* @doc "mask for the bits 4-7 main-loop counter nibble" */
 
