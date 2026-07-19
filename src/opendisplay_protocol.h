@@ -9,8 +9,8 @@
  *   image PIPE. A new engineer or an AI agent should be able to implement a
  *   fully-correct client from THIS FILE ALONE, without reading firmware.
  *
- *   OD_PROTOCOL_VERSION 2.0   (MAJOR.MINOR; see VERSIONING POLICY below)
- *   LAST CHANGED        2026-07-16
+ *   OD_PROTOCOL_VERSION 2.1   (MAJOR.MINOR; see VERSIONING POLICY below)
+ *   LAST CHANGED        2026-07-18
  *
  * --------------------------------------------------------------------------
  * VERSIONING POLICY
@@ -52,12 +52,28 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.0)
- *     - Doc-only: LANGUAGE / LINKAGE RULE now requires macro VALUES to stay
- *       simple (literal or reference to a prior macro) so the header stays
- *       parseable by tools/gen_python_protocol.py. No wire bytes change; no bump.
+ *   Unreleased (since 2.1)
  *     - Add each further wire-spec change here as it lands. On the next version
  *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.1  (2026-07-18)
+ *     - MINOR: new CMD_POWER_OFF (0x0053) -- explicit hard rail-cut via the
+ *       D-FF power latch; wakes ONLY on a physical button. Fire-and-forget
+ *       (ACK queued best-effort, usually dies before the rail is cut). Adds
+ *       RESP_POWER_OFF (0x53) and the scoped OD_ERR_POWER_OFF_* namespace
+ *       (SECTION 4d).
+ *     - MINOR: CMD_DEEP_SLEEP (0x0052) now documents its optional one-shot
+ *       [seconds:2 BE] wake-timer payload (shipped in-2.x, Firmware PR #97;
+ *       wire framing UNCHANGED) and gains the scoped OD_ERR_DEEP_SLEEP_* NACK
+ *       namespace (SECTION 4c: 0x00 unsupported, 0x01 disabled, 0x02
+ *       not-battery). Client rule: 0x01/0x02 mean "rejected, still awake".
+ *     - BEHAVIORAL (wire framing UNCHANGED, not breaking): target design for
+ *       0x0052 on D-FF-latch ESP32 changes from power-off to timer-wake deep
+ *       sleep (latch held through sleep, like non-latch boards); the hard
+ *       rail-cut moves exclusively to CMD_POWER_OFF (0x0053).
+ *     - Doc-only: LANGUAGE / LINKAGE RULE now requires macro VALUES to stay
+ *       simple (literal or reference to a prior macro) so the header stays
+ *       parseable by tools/gen_python_protocol.py. No wire bytes change.
  *
  *   2.0  (2026-07-15)
  *     - Initial shared protocol contract: one self-documenting header vendored
@@ -208,8 +224,8 @@
  * when to bump which number. This marker describes the spec and is NOT sent on
  * the wire (the negotiated 0x0080 PIPE_VERSION is a separate field). */
 #define OD_PROTOCOL_VERSION_MAJOR      2u
-#define OD_PROTOCOL_VERSION_MINOR      0u
-#define OD_PROTOCOL_VERSION_STR        "2.0"
+#define OD_PROTOCOL_VERSION_MINOR      1u
+#define OD_PROTOCOL_VERSION_STR        "2.1"
 
 /* ==========================================================================
  * SECTION 1 -- COMMAND OPCODES (16-bit, big-endian on the wire)
@@ -348,18 +364,79 @@
 
 /* --------------------------------------------------------------------------
  * @opcode: 0x0052   @name: CMD_DEEP_SLEEP   @dir: host->device
- * @request:  [0x00][0x52]  OR  [0x00][0x52][seconds:2 BE]  (optional wake timer)
- * @response: best-effort / target-specific; tolerate the link dropping:
- *              ESP32 w/ power latch : [0x00][0x52] then powers off (~100 ms).
- *              ESP32 w/o latch      : sleeps immediately, no ACK, link drops.
- *              Silabs Flex          : [0x00][0x52] then closes link, enters EM4.
- *              nRF                  : logs only (deep sleep unsupported).
- * @errors:   none
- * @state:    session required when security enabled.
- * @limits:   optional [seconds:2 BE] wake interval.
- * @targets:  Firmware (ESP32) | Silabs   (nRF targets: no-op)
+ * @request:  [0x00][0x52]                 -> sleep now, configured cadence.
+ *            [0x00][0x52][seconds:2 BE]   -> sleep now; wake timer = seconds
+ *                                            for THIS cycle only (one-shot,
+ *                                            never persisted).
+ *              - seconds is a BIG-ENDIAN uint16 (deliberate, documented
+ *                exception to the LE payload default). Range 1..65535 s
+ *                (~18.2 h; the wire width is the ceiling).
+ *              - seconds == 0x0000 or empty payload = "no override" (use
+ *                configured deep_sleep_time_seconds); NOT an error.
+ *              - len == 1 is malformed -> logged, treated as no override
+ *                (not rejected). Bytes beyond the 2 seconds bytes are ignored
+ *                (forward compatibility).
+ * @response: FIRE-AND-FORGET. ACK/NACK are OPTIONAL / best-effort; a sender
+ *            MUST NOT expect, block on, or infer success/failure from any
+ *            frame. The SUCCESS path emits NO frame: the device enters deep
+ *            sleep and BLE drops -- treat disconnect/silence as "delivered".
+ *              [0xFF][0x52][0x01][0x00]  deep sleep disabled in config.
+ *              [0xFF][0x52][0x02][0x00]  mains-powered; refuses to sleep.
+ *              [0xFF][0x52][0x00][0x00]  unsupported target (nRF; may instead
+ *                                        stay silent and log).
+ *              [0xFE][0x52]              auth required (no live session).
+ * @errors:   NACK data[0] scoped to opcode 0x52 (OD_ERR_DEEP_SLEEP_*, see
+ *            SECTION 4c): 0x00 UNSUPPORTED, 0x01 DISABLED
+ *            (deep_sleep_time_seconds == 0), 0x02 NOT_BATTERY (power_mode
+ *            != 1). CRITICAL client rule: 0x01/0x02 mean "rejected -- device
+ *            still AWAKE and reachable"; ONLY 0x00 means the target lacks deep
+ *            sleep. Never conflate them.
+ * @state:    session required when security enabled. The override is consumed
+ *            at sleep entry; the next wake (and every later one) reverts to the
+ *            configured cadence. An aborted sleep discards the override.
+ * @limits:   optional [seconds:2 BE]; ceiling 65535 s (wire width). Recommended
+ *            client-side floor >= 10 s (wake-storm guard).
+ * @targets:  Firmware (ESP32: honors duration, incl. D-FF-latch HW -- target
+ *            design, see @changed; reTerminal E1001/2/3 have no latch and
+ *            already plain timer-sleep) | Silabs (ACKs, IGNORES payload, enters
+ *            EM4) | nRF targets: unsupported.
+ * @changed:  target design -- D-FF-latch ESP32 now timer-sleeps like non-latch
+ *            boards (latch HELD through deep sleep) instead of powering off;
+ *            the hard rail-cut moved to CMD_POWER_OFF (0x0053). Wire framing of
+ *            0x0052 is UNCHANGED.
+ * @since:    [seconds:2 BE] one-shot payload shipped in-2.x (Firmware PR #97);
+ *            documented + error namespace added in 2.1.
  * -------------------------------------------------------------------------- */
 #define CMD_DEEP_SLEEP                 0x0052u
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0053   @name: CMD_POWER_OFF   @dir: host->device
+ * @request:  [0x00][0x53]  (bare). Any trailing payload is RESERVED and
+ *            ignored today; senders SHOULD send none.
+ * @response: FIRE-AND-FORGET (same acknowledgement model as 0x0052):
+ *              [0x00][0x53]              ACK is QUEUED on latch HW but usually
+ *                                        dies in the TX buffer before the rail
+ *                                        is cut (~100 ms later). Expected, NOT
+ *                                        a bug; senders MUST NOT wait for it --
+ *                                        treat transmit as "delivered".
+ *              [0xFF][0x53][0x00][0x00]  no power latch on this target.
+ *              [0xFE][0x53]              auth required (no live session).
+ * @errors:   NACK data[0] scoped to opcode 0x53 (OD_ERR_POWER_OFF_*, see
+ *            SECTION 4d): 0x00 UNSUPPORTED (no D-FF latch). A target that
+ *            refuses 0x53 may still accept 0x52 deep sleep -- do not conflate
+ *            "power-off unsupported" with "cannot sleep".
+ * @state:    session required when security enabled. Cuts the power rail via
+ *            the D-FF latch; the device wakes ONLY on a physical button press
+ *            (fresh cold boot). No timer, no wake interval -- power-off is
+ *            absolute.
+ * @limits:   trailing payload reserved/ignored.
+ * @targets:  Firmware (ESP32, D-FF power-latch HW ONLY). All other targets
+ *            (non-latch/mains ESP32, Silabs, nRF) NACK [0xFF][0x53][0x00].
+ * @since:    new in 2.1 -- splits the hard rail-cut out of 0x0052 so latch HW
+ *            gets timed-wake sleep via 0x0052 and an explicit,
+ *            capability-gated hard-off via 0x0053.
+ * -------------------------------------------------------------------------- */
+#define CMD_POWER_OFF                  0x0053u
 
 /* --------------------------------------------------------------------------
  * @opcode: 0x0070   @name: CMD_DIRECT_WRITE_START   @dir: host->device
@@ -583,6 +660,7 @@
 #define RESP_AUTHENTICATE              0x50u
 #define RESP_ENTER_DFU                 0x51u
 #define RESP_DEEP_SLEEP                0x52u
+#define RESP_POWER_OFF                 0x53u
 
 /* Direct-write family (Firmware / NRF52811 + shared). */
 #define RESP_DIRECT_WRITE_START_ACK        0x70u
@@ -644,6 +722,9 @@
  *     OD_ERR_PIPE_START_* codes.
  *   - The NFC handler (CMD_NFC_ENDPOINT 0x83) MUST emit ONLY NFC_ERR_* codes
  *     (SECTION 5).
+ *   - The CMD_DEEP_SLEEP handler (0x52) MUST emit ONLY OD_ERR_DEEP_SLEEP_*
+ *     codes (SECTION 4c); the CMD_POWER_OFF handler (0x53) ONLY
+ *     OD_ERR_POWER_OFF_* codes (SECTION 4d).
  *   A code from one namespace must NEVER appear in another handler's NACK. The
  *   overlapping raw byte values are intentional and safe ONLY because the echoed
  *   opcode scopes them -- pick the constant by which opcode you are answering.
@@ -673,6 +754,25 @@
 #define OD_ERR_PIPE_START_ETAG_MISMATCH       0x05u   /* partial: old_etag mismatch */
 #define OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED 0x06u   /* partial mode not supported */
 #define OD_ERR_PIPE_START_RECT_INVALID        0x07u   /* partial: invalid rectangle */
+
+/* --------------------------------------------------------------------------
+ * 4c. DEEP-SLEEP errors -- scope: CMD_DEEP_SLEEP (0x0052) ONLY.
+ *     NACK frame: [0xFF][0x52][err][0x00].  Byte values 0x00..0x02 are reused
+ *     from other namespaces -- scoped by the echoed opcode, as always. Note
+ *     0x00 IS a valid error code here (a NACK's data[0], never a success
+ *     marker). CLIENT RULE: 0x01/0x02 mean "rejected, device still AWAKE and
+ *     reachable"; ONLY 0x00 means deep sleep is unsupported on the target.
+ *     Never conflate the two classes.
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_DEEP_SLEEP_UNSUPPORTED  0x00u   /* target has no deep sleep (nRF) */
+#define OD_ERR_DEEP_SLEEP_DISABLED     0x01u   /* deep_sleep_time_seconds == 0 in config */
+#define OD_ERR_DEEP_SLEEP_NOT_BATTERY  0x02u   /* power_mode != 1 (mains-powered) */
+
+/* --------------------------------------------------------------------------
+ * 4d. POWER-OFF errors -- scope: CMD_POWER_OFF (0x0053) ONLY.
+ *     NACK frame: [0xFF][0x53][err][0x00].
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_POWER_OFF_UNSUPPORTED   0x00u   /* no D-FF power latch on this target */
 
 /* ==========================================================================
  * SECTION 5 -- NFC SUB-PROTOCOL (rides CMD_NFC_ENDPOINT 0x0083)
