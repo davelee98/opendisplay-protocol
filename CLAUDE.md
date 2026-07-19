@@ -22,14 +22,15 @@ This is one repo inside the larger OpenDisplay multi-repo workspace (see `../CLA
 **Never hand-edit a vendored copy or the generated `.py`.** Edit the canonical `.h`, then propagate and verify:
 
 ```bash
-tools/sync_protocol_header.py --push     # canonical .h → all firmware copies
-tools/sync_protocol_header.py --check     # fail if any vendored copy drifted (CI/pre-commit)
-tools/sync_protocol_header.py --list      # show the copy map
+tools/sync_protocol_header.py --push                     # both canonical .h → all firmware copies
+tools/sync_protocol_header.py --check                     # fail if any vendored copy drifted (CI/pre-commit)
+tools/sync_protocol_header.py --check --artifact protocol # scope to one header (protocol | structs)
+tools/sync_protocol_header.py --list                      # show the copy map
 tools/gen_python_protocol.py --write      # regenerate src/opendisplay_protocol.py
 tools/gen_python_protocol.py --check       # fail if the .py drifted (CI/pre-commit)
 ```
 
-Both tools are stdlib-only, Python 3.8+, no third-party deps. `--check` is a hash/diff compare and is what CI runs in each consumer repo. Firmware CI fetches the canonical header from GitHub raw via `--canonical-url ... --dest ...`.
+`sync_protocol_header.py` vendors **both** canonical C headers — `opendisplay_protocol.h` and `opendisplay_structs.h` — into the firmware repos (use `--artifact protocol|structs` to scope). The `structs` copies show MISSING/DRIFT until each firmware repo adopts the shared header (shared-types-plan phase 2), so pre-adoption CI can scope to `--artifact protocol`. The generated language mirrors (`opendisplay_{protocol,structs}.{py,js,d.ts,swift}`) are NOT vendored by this tool — each has its own `gen_*` drift gate. All tools are stdlib-only, Python 3.8+, no third-party deps. `--check` is a hash/diff compare and is what CI runs in each consumer repo. Firmware CI fetches the canonical header from GitHub raw via `--canonical-url ... --dest ...`.
 
 ## Editing the header
 
