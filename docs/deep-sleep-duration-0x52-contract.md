@@ -1,13 +1,27 @@
-# Protocol & API Contract — `CMD_DEEP_SLEEP` (0x0052) with Duration Payload
+# Protocol & API Contract — `CMD_DEEP_SLEEP` (0x0052) + `CMD_POWER_OFF` (0x0053)
 
-*Normative contract for the 0x0052 deep-sleep command and its optional wake-timer payload.
-2026-07-17. Reflects the behavior **shipped** on `Firmware/main` (PR #97, `d974f9d`). Companion
-plan: [deep-sleep-duration-0x52-plan.md](deep-sleep-duration-0x52-plan.md).*
+*Normative contract for the 0x0052 deep-sleep command (with its optional wake-timer payload) and the new
+0x0053 power-off command. 2026-07-17; **revised 2026-07-18** to split "sleep" from "power off": 0x0052 now
+performs a timer-wake deep sleep on **all** battery targets — including power-latch (D-FF) hardware — and
+the hard rail-cut moves to the dedicated 0x0053. Companion plan:
+[deep-sleep-duration-0x52-plan.md](deep-sleep-duration-0x52-plan.md).*
+
+> **Shipped vs. target.** The 0x0052 *duration payload* is shipped (Firmware PR #97, `d974f9d`). The 0x0052
+> *latch behavior change* (latch → timer-wake sleep instead of power-off) and the entire 0x0053 command are
+> a **target design, not yet shipped** — they require firmware work (see the plan).
+>
+> **Hardware feasibility — RESOLVED (2026-07-18 schematic review).** Holding the rail powered across
+> `esp_deep_sleep_start()` for a timer wake is **feasible** (§2.7). On the Seeed **reTerminal E1001/E1002/
+> E1003** it is *inherent*: those boards have **no D-FF latch** — a mechanical slide switch feeds an SY6974B
+> power-path and an always-on TPS631000 rail (EN tied high), so **no GPIO gates the rail** and the D-FF
+> power-off branch never fires there. On actual D-FF hardware the firmware already holds the flip-flop's D
+> input high across deep sleep (`powerLatchHoldForSleep()`), and a D flip-flop retains its Q (power-enable)
+> through sleep by nature. The **only** residual rail-drop risk is an *I²C-commanded SY6974B ship mode*
+> (battery disconnect, button-only revive) — plain deep sleep never triggers it.
 
 > This document describes the wire contract and the `py-opendisplay` API contract. Where the current
 > canonical header (`opendisplay-protocol/src/opendisplay_protocol.h`) or `py-opendisplay` disagrees with
-> this document, they are **out of date** — this contract states the shipped firmware behavior that both
-> must be brought to match (see the plan).
+> this document, they must be brought to match this contract (see the plan).
 
 ---
 
@@ -28,8 +42,9 @@ never exceed the range already reachable through the persistent config field.
 **Acknowledgement model (normative).** `0x0052` is a **fire-and-forget** command. The device **MAY** emit
 an ACK or a NACK (§2.4), and a sender that receives one **SHOULD** use it — but a sender **MUST NOT**
 *expect* one, block on one, or treat its **absence** as either success or failure. There is deliberately
-**no wire condition that a sender may rely on to confirm the device slept**: on the primary path the
-device tears down BLE without a frame, and even the latch-path ACK may never leave the buffer (§2.4).
+**no wire condition that a sender may rely on to confirm the device slept**: on **every** battery path —
+latch or non-latch — the device now enters deep sleep and tears down BLE without a frame (§2.4). (The old
+latch-path ACK belonged to the *power-off* behavior, which has moved to `0x0053`.)
 Senders treat a successfully-transmitted command as "delivered; the device will act per its capability,"
 and use a received NACK only as an opportunistic, non-guaranteed correction.
 
@@ -51,7 +66,7 @@ and use a received NACK only as an opportunistic, non-guaranteed correction.
 | `00 52` | Sleep now, configured `deep_sleep_time_seconds`. Unchanged legacy behavior. |
 | `00 52 HH LL` | Sleep now; wake timer = `(HH << 8) \| LL` seconds (**big-endian uint16**), one cycle only. |
 
-Parsing rules as implemented (`Firmware/src/device_control.cpp:709-717`):
+Parsing rules as implemented (`Firmware/src/device_control.cpp:711-716`):
 - `len >= 2`: seconds = big-endian first two payload bytes; **any bytes beyond 2 are ignored** (forward
   compatibility).
 - `len == 1`: malformed; logged and treated as **no override** (does not reject).
@@ -72,8 +87,7 @@ required. `cmd_echo` for this command is `0x52`.
 
 | Frame | Status | Meaning | Device outcome |
 |---|---|---|---|
-| *(no frame)* | — | Battery, no power latch: enters deep sleep synchronously and tears down BLE. | **Sleeps.** Link drops; treat disconnect as success. |
-| `00 52 00 00` | ACK | Power-latch (D-FF) hardware: acknowledges, then hard-powers-off after ~100 ms. **Any duration payload is ignored** (no timer exists after power-off). | **Powers off.** Wakes only on physical button. |
+| *(no frame)* | — | Battery, **latch or non-latch**: enters deep sleep synchronously, arms timer/button wake, and tears down BLE. On D-FF latch HW the latch is **held**, not cut (feasible — §2.7); reTerminal E-series have no latch to hold (always-on rail). | **Sleeps.** Link drops; treat disconnect as success. |
 | `FF 52 01 00` | NACK | Deep sleep **disabled in device config** (`deep_sleep_time_seconds == 0`). | **Stays awake.** Reachable; retry only after fixing config. |
 | `FF 52 02 00` | NACK | Device is **mains-powered** (`power_mode != 1`). | **Stays awake.** Reachable. |
 | `FF 52 00 00` / *(no frame, nRF)* | NACK / none | Command **not supported** on this target (nRF logs only, sends nothing). | No sleep. |
@@ -100,13 +114,13 @@ The two rules are independent and both normative:
 - **Device side — ACK/NACK are *allowed* (best-effort).** The firmware **MAY** emit the ACK (`00 52 00 00`)
   or a NACK (`FF 52 xx`) as documented in §2.3. These frames are *permitted and meaningful when they
   arrive*, but the protocol makes **no delivery guarantee** for them. In particular:
-  - The **primary success path** (battery, no latch) sends **no frame at all** — it enters deep sleep and
-    tears down BLE synchronously.
-  - The **latch-path ACK is queued but may never transmit**: `sendResponse()` only enqueues
-    (`communication.cpp:89,102-105`); the queue is drained on a *later* `loop()` pass
-    (`main.cpp:238-247`), but the handler busy-waits `delay(100)` and then powers the rail off, so the ACK
-    typically dies in the buffer. This is *acceptable under this model* — it is exactly why senders must
-    not expect it, and it is **not** a firmware bug that needs fixing for correctness.
+  - The **primary success path** (battery, **latch or non-latch**) sends **no frame at all** — it enters
+    deep sleep and tears down BLE synchronously.
+  - The **power-off ACK is queued but may never transmit** — this now applies to **`0x0053 CMD_POWER_OFF`**
+    on latch hardware (0x0052 no longer powers off): `sendResponse()` only enqueues; the queue is drained on
+    a *later* `loop()` pass, but the handler busy-waits `delay(100)` and then powers the rail off, so the ACK
+    typically dies in the buffer. This is *acceptable under this model* — it is exactly why senders must not
+    expect it, and it is **not** a firmware bug that needs fixing for correctness.
   - The **NACKs (`FF 52 01/02`) do transmit reliably** today (the handler returns, the device stays awake,
     the loop drains them), but a sender still must not *depend* on receiving them — proxy latency,
     encryption-decrypt timing, or a short read window can drop them.
@@ -130,7 +144,7 @@ is true regardless of whether the device slept or opportunistically refused.
 
 ### 2.5 One-shot semantics
 The override is a per-command parameter consumed at sleep entry
-(`enterDeepSleep(force, overrideSleepSeconds)`, `Firmware/src/main.cpp:468`, arm at `:515-519`). It is
+(`enterDeepSleep(force, overrideSleepSeconds)`, `Firmware/src/main.cpp:510`, arm at `:557-565`). It is
 **never stored** (no flash, no RTC-retained memory). Consequences:
 - The next wake (and every wake after) uses the configured `deep_sleep_time_seconds`.
 - An aborted sleep (e.g. a client reconnects before entry) discards the override.
@@ -147,7 +161,8 @@ The override is a per-command parameter consumed at sleep entry
 | Target | Duration honored? | Notes |
 |---|---|---|
 | ESP32 (battery, no latch) | **Yes** | Happy path; no ACK; link drops. Timer wake armed for the override or config seconds. |
-| ESP32 (power-latch D-FF) | **No** | ACKs `00 52 00 00`, then powers off. Payload ignored. Button wake only. |
+| ESP32 (power-latch D-FF) | **Yes (target)** | **Changed:** now identical to non-latch — holds the latch, arms timer/override wake, sleeps; no frame. **Feasible (verified 2026-07-18):** the firmware already holds the flip-flop's D input across deep sleep (`powerLatchHoldForSleep()` → `gpio_deep_sleep_hold_en()` / `gpio_hold_en()`), and a D flip-flop retains Q through sleep. A caller wanting a hard off uses `0x0053`. |
+| ESP32 (reTerminal E1001/2/3) | **Yes (already)** | **No D-FF latch** — mechanical slide switch + SY6974B power-path + always-on TPS631000 rail (EN tied high); no GPIO gates the rail. The latch branch never fires; 0x0052 is a plain timer-sleep here today. Rail stays up through deep sleep inherently. |
 | ESP32 (mains, `power_mode != 1`) | n/a | `FF 52 02`; stays awake. |
 | Silabs Flex | **No (today)** | ACKs and ignores payload; enters EM4 (button/NFC wake), no timer armed. BURTC-timed EM4 is a plausible future enhancement — the wire format already supports it. |
 | nRF | **No** | Unsupported; logs only / `FF 52 00`. |
@@ -158,6 +173,39 @@ The override is a per-command parameter consumed at sleep entry
 | Ceiling | `65535` s (≈18.2 h) | Wire width (`uint16`). |
 | Floor (recommended) | ≥ `10` s | Sending library today; **not** yet in firmware (see plan §5). `X < 10` risks a wake storm. |
 | `0x0000` | = configured cadence | Firmware treats as "no override," not an error. |
+
+### 2.9 Companion command — `CMD_POWER_OFF` (0x0053)
+
+Introduced by this revision to carry the **hard power-off** semantics that used to live on 0x0052's latch
+path. `CMD_POWER_OFF` (opcode `0x0053`, host → device) cuts the device's power rail via the D-FF latch; the
+device then wakes **only on a physical button press** (a fresh cold boot). There is no timer and no wake
+interval — power-off is absolute.
+
+**Payload.** Optional and **reserved**: firmware ignores any payload today (bare `00 53`). The field is held
+open for a possible future variant; senders SHOULD send no payload. Bytes beyond the opcode are ignored.
+
+**Targets & responses.** Only power-latch hardware can honor it; every other target refuses.
+
+| Frame | Status | Meaning | Device outcome |
+|---|---|---|---|
+| `00 53 00 00` *(queued)* | ACK | Power-latch (D-FF) HW: acknowledges, then `powerLatchPowerOff()` after ~100 ms. ACK is best-effort (§2.4) — usually dies in the buffer before the rail is cut. | **Powers off.** Button wake only. |
+| `FF 53 00 00` | NACK | **No power latch on this target** (battery non-latch, mains, Silabs, nRF): there is no rail to cut. | **Stays awake / unchanged.** Reachable. |
+| `FE 53` | AUTH | Security enabled, no live session. | Dropped; authenticate first. |
+
+**Error namespace (scoped to opcode `0x53`).**
+
+| `data[0]` | Name (proposed) | Meaning | Client action |
+|---|---|---|---|
+| `0x00` | `OD_ERR_POWER_OFF_UNSUPPORTED` | Target has no power latch (cannot cut its own rail). | Report unsupported. If the intent was low power (not a hard off), use `0x0052` instead. |
+
+**Acknowledgement model.** Identical to 0x0052 (§2.4): **fire-and-forget**. The power-off ACK is queued and
+usually not transmitted before the rail is cut; senders MUST NOT expect it. Treat a successful transmit as
+"delivered."
+
+**Why split it out.** Overloading 0x0052 forced latch hardware to power off when a caller only wanted
+low-power sleep, and left latch devices unable to do a timed wake at all. Separating the two gives *every*
+battery target a uniform "sleep, wake on timer" via 0x0052, and a caller that specifically wants the device
+fully off (button-only revival) an explicit, capability-gated 0x0053.
 
 ---
 
@@ -183,9 +231,12 @@ file only, then `tools/sync_protocol_header.py --push && --check`, and regenerat
  *            NOT expect, block on, or infer success from any frame. No frame is
  *            guaranteed, and absence is the normal success signal:
  *              ESP32 battery, no latch : NO frame; sleeps immediately, link drops.
- *              ESP32 w/ D-FF latch     : [0x00][0x52][0x00][0x00] ACK is QUEUED but
- *                                        usually not sent before power-off (~100 ms);
- *                                        duration IGNORED (no timer). Loss is allowed.
+ *              ESP32 w/ D-FF latch     : TARGET = identical to non-latch (holds latch,
+ *                                        timer/button wake, no frame). Feasible: fw holds
+ *                                        the FF's D across deep sleep; a D-FF retains Q.
+ *                                        Hard power-off now lives in CMD_POWER_OFF (0x53).
+ *              ESP32 reTerminal E1001/2/3: no D-FF latch (slide switch + always-on rail);
+ *                                        0x0052 is already plain timer-sleep there.
  *              Silabs Flex             : ACK, closes link, enters EM4 (payload ignored).
  *              nRF                     : not supported (logs; may send FF 52 00 00).
  *            A received NACK (below) is an opportunistic, non-guaranteed signal that
@@ -205,10 +256,32 @@ file only, then `tools/sync_protocol_header.py --push && --check`, and regenerat
 #define OD_ERR_DEEP_SLEEP_UNSUPPORTED      0x00u
 #define OD_ERR_DEEP_SLEEP_DISABLED         0x01u
 #define OD_ERR_DEEP_SLEEP_NOT_BATTERY      0x02u
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0053   @name: CMD_POWER_OFF   @dir: host->device
+ * @request:  [0x00][0x53]   (optional trailing payload RESERVED, ignored today).
+ *              - Hard power-off via the D-FF power latch. No timer, no wake
+ *                interval; the device wakes ONLY on a physical button press.
+ * @response: FIRE-AND-FORGET (same model as 0x0052; ACK/NACK optional/best-effort):
+ *              ESP32 w/ D-FF latch : [0x00][0x53][0x00][0x00] ACK is QUEUED but usually
+ *                                    not sent before powerLatchPowerOff() (~100 ms).
+ *              all other targets   : NACK [0xFF][0x53][0x00][0x00] -- no power latch.
+ * @errors:   NACK data[0], scoped to opcode 0x53:
+ *              0x00 OD_ERR_POWER_OFF_UNSUPPORTED    no power latch on this target.
+ * @state:    session required when security enabled.
+ * @limits:   optional trailing payload reserved (ignored). Button is the only wake.
+ * @targets:  Firmware (ESP32, power-latch HW only)   (all others: NACK 0xFF 53 00)
+ * @since:    new in this revision (companion to the 0x0052 latch behavior change).
+ * -------------------------------------------------------------------------- */
+#define CMD_POWER_OFF                     0x0053u
+#define OD_ERR_POWER_OFF_UNSUPPORTED      0x00u
 ```
 
-Changelog: add under `Unreleased (since 2.0)` (or roll into a `2.1` heading — MINOR bump, backward-
-compatible addition of an optional payload + a scoped NACK namespace), set `LAST CHANGED`.
+Changelog: add under `Unreleased (since 2.0)` (or roll into a `2.1` heading — MINOR bump: backward-
+compatible addition of an optional 0x0052 payload + scoped NACK namespace, the **new 0x0053 opcode**, and
+the 0x0052 latch behavior change). Set `LAST CHANGED`. Note the 0x0052 latch change is a *behavior* change
+on latch hardware (power-off → timer-wake sleep); call it out explicitly in the changelog even though the
+wire framing of 0x0052 is unchanged.
 
 ---
 
@@ -255,7 +328,25 @@ Contract obligations:
 
 ### 4.3 CLI
 `opendisplay sleep <device> [--for SECONDS]` — `--for` omitted sends the bare command; `--for` packs a
-big-endian duration and applies the same range validation.
+big-endian duration and applies the same range validation. A separate `opendisplay power-off <device>`
+maps to `power_off()` (§4.4) — deliberately a distinct subcommand so "sleep" and "hard off" can never be
+confused at the CLI.
+
+### 4.4 `build_power_off_command() -> bytes` and `async power_off(self) -> None`
+
+`build_power_off_command()` returns `b"\x00\x53"` (no payload — the field is reserved). `power_off()` is
+**fire-and-forget** exactly like `deep_sleep()` (§4.2): transmit, then treat disconnect / read timeout /
+opportunistic ACK as **"delivered."** A `FF 53 00` seen in the bounded best-effort window raises
+`PowerOffUnsupportedError` — the target has no power latch. Callers must not conflate "power-off
+unsupported" with "cannot sleep": an unsupported target may still accept `0x0052`. Because power-off is
+absolute (no wake timer), `power_off()` takes **no** `duration_s` parameter.
+
+| What the method observes | Result | Claim |
+|---|---|---|
+| Write succeeds, then disconnect / timeout / no frame | **return** (success) | "delivered" — device is powering off |
+| Write fails as the link tears down (`BLEConnectionError`) | **return** (success) | "delivered" |
+| `00 53 00 00` (ACK) received opportunistically | **return** (success) | "delivered / acknowledged" |
+| `FF 53 00` received in the best-effort window | raise `PowerOffUnsupportedError` | target has **no latch**; still reachable |
 
 ---
 
@@ -267,6 +358,12 @@ big-endian duration and applies the same range validation.
 - [ ] Empty / `0x0000` payload = configured cadence, one-shot, never persisted.
 - [ ] `FF 52 01` / `FF 52 02` decoded as **rejected & awake**, not unsupported.
 - [ ] `FF 52 00` (or silent nRF) decoded as unsupported.
-- [ ] Latch hardware: duration ignored, device powers off — clients must not expect a timed wake.
+- [ ] **Latch HW 0x0052 = timer-wake sleep** (no longer power-off) — feasibility **resolved** (2026-07-18):
+      D-FF hardware holds the FF's D across deep sleep (fw already does this) and a D-FF retains Q; reTerminal
+      E1001/2/3 have no latch at all (always-on rail). Sole residual risk: I²C-commanded SY6974B ship mode.
+- [ ] **`0x0053 CMD_POWER_OFF`**: latch HW → ACK then rail cut (button-only wake); all other targets →
+      `FF 53 00` unsupported. Fire-and-forget; optional payload reserved/ignored.
+- [ ] `power_off()` is a distinct method/CLI subcommand (no `duration_s`); `FF 53 00` → `PowerOffUnsupportedError`.
 - [ ] Ceiling `65535` s enforced by width; client floor ≥ 10 s (firmware clamp recommended).
-- [ ] Header edited canonically, `--push`/`--check` run, Python mirror regenerated, MINOR bump recorded.
+- [ ] Header edited canonically (0x0052 latch note **and** new 0x0053 block), `--push`/`--check` run, Python
+      mirror regenerated, MINOR bump recorded (call out the 0x0052 latch *behavior* change explicitly).
