@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Generate the Swift protocol constants module from opendisplay_protocol.h.
+
+The C header `src/opendisplay_protocol.h` is the single source of truth for every
+value on the OpenDisplay BLE wire. Firmware repos vendor it byte-for-byte; Swift
+(the OD App) cannot `#include` a C header, so this tool GENERATES the equivalent
+Swift module and CI verifies it has not drifted -- the cross-language analog of the
+firmware `--check`, and the sibling of gen_python_protocol.py / gen_js_protocol.py
+(and gen_swift_structs.py). Parsing is done by the shared `protocol_model` (the same
+IR the Python and JS mirrors consume); this file is only the Swift renderer, so it
+can never drift from the other mirrors on what the header MEANS.
+
+CANONICAL SOURCE
+    opendisplay-protocol/src/opendisplay_protocol.h    (macro-only, `u`-suffixed)
+
+GENERATED ARTIFACT
+    opendisplay-protocol/src/opendisplay_protocol.swift (flat `public let` constants)
+
+WHY FLAT CONSTANTS, NOT A SWIFT ENUM
+    The header deliberately reuses byte values across distinct names (0x73 is both
+    RESP_LED_ACTIVATE_ACK and RESP_DIRECT_WRITE_REFRESH_SUCCESS; 0xFF is both
+    RESP_NACK and RESP_DIRECT_WRITE_ERROR). A Swift raw-value enum CANNOT declare two
+    cases with the same rawValue (it is a compile error) and would erase a name.
+    Module-level `public let` constants preserve every name and value faithfully --
+    the same reason the Python mirror uses flat `Final`s and the JS mirror flat
+    `export const`s rather than an IntEnum / TS enum. (The Swift STRUCTS mirror can
+    use real enums/OptionSets only because those values are unique; protocol
+    constants are flat for this documented duplicate-value reason.)
+
+USAGE
+    tools/gen_swift_protocol.py --write         # (re)generate src/opendisplay_protocol.swift
+    tools/gen_swift_protocol.py --check          # verify it matches (exit 1 on drift)
+    tools/gen_swift_protocol.py --stdout         # print generated module, write nothing
+    tools/gen_swift_protocol.py --header FILE --out FILE   # explicit paths
+
+EXIT CODES
+    0  success / in sync
+    1  drift, missing file, or a value the parser cannot classify
+
+Stdlib only; no third-party dependencies. Python 3.8+. The generated Swift depends
+only on the Swift standard library (no Foundation).
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+from protocol_model import Const, Group, clean_edges, die, parse_header, protocol_version, reconcile, source_sha
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_HEADER = REPO_ROOT / "src" / "opendisplay_protocol.h"
+DEFAULT_OUT = REPO_ROOT / "src" / "opendisplay_protocol.swift"
+REGEN_CMD = "tools/gen_swift_protocol.py --write"
+
+
+def _comment_lines(doc: List[str]) -> List[str]:
+    """Render cleaned doc lines as Swift line comments (bare `//` for blank lines)."""
+    return [("//" if line == "" else f"// {line}") for line in doc]
+
+
+def _doc_lines(doc: List[str]) -> List[str]:
+    """Render cleaned doc lines as Swift `///` doc comments, preserving line breaks.
+
+    Kept line-for-line (not re-wrapped) because these are the header's structured
+    @opcode/@request/... spec blocks whose ASCII framing must survive intact -- the
+    same verbatim carry-through the Python/JS mirrors use, just with a `///` prefix.
+    """
+    return [("///" if line == "" else f"/// {line}") for line in doc]
+
+
+def _is_opcode_group(group: Group) -> bool:
+    """True for the 16-bit COMMAND OPCODES section (its ints are UInt16, not UInt8)."""
+    return "COMMAND OPCODES" in group.label.upper()
+
+
+def _swift_type(const: Const, group: Group) -> Optional[str]:
+    """Swift type annotation for a constant, or None for a `ref` (type is inferred).
+
+    - str macro (e.g. "2.0")            -> String
+    - ref macro (alias to another name) -> None; `let A = B` inherits B's type so the
+                                           alias keeps exact type+value parity.
+    - int macro                         -> width by section/magnitude: every opcode in
+                                           SECTION 1 is 16-bit (UInt16) even when its
+                                           value fits a byte (e.g. 0x000F); elsewhere a
+                                           single-byte response/status/error code is
+                                           UInt8, widening to UInt16/UInt32 by value.
+    """
+    if const.kind == "str":
+        return "String"
+    if const.kind == "ref":
+        return None
+    iv = int(const.value, 16) if const.value[:2].lower() == "0x" else int(const.value)
+    if _is_opcode_group(group) or iv > 0xFFFF:
+        return "UInt32" if iv > 0xFFFF else "UInt16"
+    if iv > 0xFF:
+        return "UInt16"
+    return "UInt8"
+
+
+def _banner(text: str, groups: List[Group], header_name: str) -> List[str]:
+    sha = source_sha(text)
+    version = protocol_version(groups)
+    return [
+        "// @generated by tools/gen_swift_protocol.py -- DO NOT EDIT BY HAND.",
+        f"// Source: {header_name} (OD_PROTOCOL_VERSION {version})",
+        f"// Source SHA-256: {sha}",
+        f"// Regenerate: {REGEN_CMD}   (CI drift gate: --check)",
+        "//",
+        "// OpenDisplay BLE wire-protocol constants. Every value here travels on the wire.",
+        "// Flat `public let` constants (not a Swift enum) because the wire reuses byte",
+        "// values across distinct names (0x73 is both RESP_LED_ACTIVATE_ACK and",
+        "// RESP_DIRECT_WRITE_REFRESH_SUCCESS; 0xFF is both RESP_NACK and",
+        "// RESP_DIRECT_WRITE_ERROR) -- a raw-value enum cannot declare two cases with the",
+        "// same rawValue and would drop a name. NACK error codes are opcode-SCOPED: decode",
+        "// data[0] only in the scope of the echoed opcode (see the header for the full",
+        "// contract). Depends only on the Swift standard library.",
+        "",
+    ]
+
+
+def render_module(text: str, groups: List[Group], header_name: str) -> str:
+    """Render the generated Swift module as a string (deterministic, no timestamp)."""
+    out = _banner(text, groups, header_name)
+    for group in groups:
+        out.append(f"// MARK: - {group.label}")
+        if group.intro:
+            out.extend(_comment_lines(group.intro))
+        out.append("")
+        for idx, const in enumerate(group.consts):
+            if const.doc and idx > 0:
+                out.append("")  # breathing room between documented constants
+            out.extend(_doc_lines(const.doc))
+            swift_type = _swift_type(const, group)
+            decl = f"public let {const.name}"
+            if swift_type is not None:
+                decl = f"{decl}: {swift_type}"
+            line = f"{decl} = {const.value}"
+            if const.inline:
+                line = f"{line}  // {const.inline}"
+            out.append(line)
+        if group.trailing:
+            out.append("")
+            out.extend(_comment_lines(clean_edges(group.trailing)))
+        out.append("")
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="gen_swift_protocol.py",
+        description="Generate the Swift protocol constants module from opendisplay_protocol.h.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--write", action="store_true", help="(re)generate and write the module")
+    mode.add_argument("--check", action="store_true", help="verify the module matches (exit 1 on drift)")
+    mode.add_argument("--stdout", action="store_true", help="print the generated module; write nothing")
+    p.add_argument("--header", metavar="FILE", help=f"canonical header path (default: {DEFAULT_HEADER})")
+    p.add_argument("--out", metavar="FILE", help=f"generated module path (default: {DEFAULT_OUT})")
+    args = p.parse_args(argv)
+
+    header_path = Path(args.header) if args.header else DEFAULT_HEADER
+    out_path = Path(args.out) if args.out else DEFAULT_OUT
+    if not header_path.is_file():
+        die(f"canonical header not found: {header_path}")
+
+    text = header_path.read_text(encoding="utf-8")
+    groups = parse_header(text)
+    if not groups:
+        die(f"no constants parsed from {header_path}")
+    generated = render_module(text, groups, header_path.name)
+
+    if args.stdout:
+        sys.stdout.write(generated)
+        return 0
+
+    ok, message = reconcile(out_path, generated, write=args.write, regen_cmd=REGEN_CMD)
+    if args.write:
+        count = sum(len(g.consts) for g in groups)
+        print(f"{message} ({count} constants)")
+        return 0
+    print(message, file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
