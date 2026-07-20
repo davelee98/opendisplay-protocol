@@ -88,7 +88,7 @@ ARTIFACTS = {
         {
             "Firmware":        "Firmware/include/opendisplay_protocol.h",
             "Firmware_NRF54":  "Firmware_NRF54/src/opendisplay_protocol.h",
-            "Firmware_Silabs": "Firmware_Silabs/opendisplay_protocol.h",
+            "Firmware_Silabs": "Firmware_Silabs/include/opendisplay_protocol.h",
             "Firmware_NRF":    "Firmware_NRF/opendisplay_protocol.h",
         },
     ),
@@ -97,7 +97,7 @@ ARTIFACTS = {
         {
             "Firmware":        "Firmware/include/opendisplay_structs.h",
             "Firmware_NRF54":  "Firmware_NRF54/src/opendisplay_structs.h",
-            "Firmware_Silabs": "Firmware_Silabs/opendisplay_structs.h",
+            "Firmware_Silabs": "Firmware_Silabs/include/opendisplay_structs.h",
             "Firmware_NRF":    "Firmware_NRF/opendisplay_structs.h",
         },
     ),
