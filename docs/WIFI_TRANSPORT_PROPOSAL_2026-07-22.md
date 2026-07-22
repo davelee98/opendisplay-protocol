@@ -36,6 +36,7 @@ The surprise headline from all four audits: **WiFi is not green-field.** The dev
    - **`encryption_enabled = 1` → TLS-PSK channel on TCP port 2447.** The PSK is derived from the existing 16-byte `SecurityConfig` master key (`tls_psk = KDF(master_key, "opendisplay-tls-psk")` via the existing CMAC KDF); the TLS handshake provides mutual auth, so no separate app-layer `AUTHENTICATE` runs over TLS. Port 2446 is **not** served in this mode.
    The port number itself signals the mode; the client and mDNS advert disambiguate without probing. The two modes are mutually exclusive per device — a tag is either plaintext-2446 or TLS-2447. This drops the earlier `require_auth_on_ip` policy: one existing flag is the whole switch.
 5. **Simultaneous BLE+WiFi:** already real in firmware, but under-specified. Rules to adopt (protocol §5 below): per-transport auth sessions; one active stateful write-session per device across all transports; responses delivered only on the originating transport (ending today's dual-delivery fan-out).
+6. **No WiFi-only device — WiFi is additive to a BLE-capable base.** Every OpenDisplay device is BLE-capable; WiFi is purely additive. This guarantees the BLE MAC is always available as the identity anchor, dissolves the provisioning-bootstrap problem (BLE is always present to deliver credentials), and means BLE+WiFi always coexist — NimBLE cannot be dropped to free RAM, so the C6-N4 TLS budget is met by mbedTLS tuning, not by removing BLE. See §8 D1. (`WIFI_ONLY_DEVICE_FEASIBILITY_2026-07-22.md` is retained as background only.)
 
 ### Reconciling the one disagreement between audits
 
@@ -254,3 +255,59 @@ Principle: **WiFi is a second transport under the existing MAC-keyed identity �
 - **TLS on C6-N4 is the RAM risk, not the plaintext path.** Per the RAM doc, concurrent BLE + WiFi + a default mbedTLS handshake is marginal on C6-N4; TLS-PSK/2447 needs `MBEDTLS_SSL_IN/OUT_CONTENT_LEN` cut to ~4–6 KB + MFL + `largest_free_block` validation on hardware. The plaintext 2446 path has no such issue. S3's PSRAM makes TLS comfortable.
 - **No forced-encryption behavior change.** WiFi mode is opt-in via the pre-existing `encryption_enabled` flag; a tag left with encryption off serves plaintext 2446 exactly as an operator would expect. No existing deployment is forced into auth.
 - **Dual-delivery removal (F4)** is technically observable behavior change for any client that relied on cross-transport response fan-out; treated as a bug fix per protocol §3.4.
+
+---
+
+## 8. Open Design Decisions
+
+Decisions that still need an owner's call — distinct from the settled questions in §1 and the watch-items in §7's risk list. Each is tagged **RESOLVED** or **OPEN**.
+
+### D1 — WiFi-only devices — **RESOLVED: not planned**
+
+**No WiFi-only device is planned. Every OpenDisplay device is BLE-capable; WiFi is purely additive** (see §1.6). Consequences that simplify the rest of the design:
+- The **BLE MAC is always present** as the identity anchor (see D3) — `device_id` is never required as a primary identity, only optional telemetry.
+- The **provisioning bootstrap problem dissolves** — BLE (`0x26` config-write, later `CMD_NET_JOIN`) is always available to deliver WiFi credentials. No SoftAP/captive-portal/Improv subsystem is needed.
+- **BLE + WiFi always coexist**; NimBLE cannot be torn down to reclaim RAM, so the C6-N4 TLS budget must be met by mbedTLS tuning (D2), not by dropping BLE. `WIFI_ONLY_DEVICE_FEASIBILITY_2026-07-22.md` (variants A/B) is retained as background only.
+
+### D2 — TLS viability on C6-N4 — **OPEN (tractable; validate on hardware)**
+
+Fork: is `encryption_enabled=1` (TLS-PSK / 2447) a **universal** capability or **S3-only**? The RAM doc rates *default* mbedTLS marginal on C6-N4 (no PSRAM), and per D1 BLE cannot be freed to make room. Approach — a trimmed mbedTLS build:
+- **Asymmetric record buffers**: `MBEDTLS_SSL_IN_CONTENT_LEN ≈ 4096` / `OUT_CONTENT_LEN ≈ 1024` (device receives large DIRECT_WRITE chunks, sends tiny ACKs) — saves ~27 KB vs the 32 KB default. Client (py-opendisplay) must `SSL_write` in ≤ IN_CONTENT_LEN chunks (already ≤4094), so this holds even without RFC 6066 MFL support in the Python client.
+- PSK-only (compile out X.509/RSA/DHE), single ECDHE-PSK ciphersuite, no session tickets/renegotiation/resumption.
+- **Statically pre-allocate the TLS context at boot** to eliminate the handshake-time heap-fragmentation spike (the actual C6 risk, not raw total RAM).
+- Estimated **~8–12 KB** vs ~35 KB default peak → fits the measured C6-N4 free RAM with BLE up.
+
+**Decision needed:** commit to this tuned build + on-hardware `largest_free_block` validation (recommended), or declare TLS **S3-only** and define what a C6 does when `encryption_enabled=1`. (No zlib-window concern: `OPENDISPLAY_ZLIB_WINDOW_BITS` is commented out on C6/S3 — only `esp32-s3-E1004` enables the 32 KB window — so the compression window is ~512 B on C6 and is not part of the TLS peak.) ECDHE-PSK vs plain-PSK is the fallback lever (drops ECC RAM/CPU at the cost of forward secrecy) only if still tight.
+
+### D3 — Identity: anchor & reconciliation — **PARTLY RESOLVED**
+
+- **Anchor — RESOLVED:** the **BLE MAC** is the cross-transport identity anchor (guaranteed present per D1). The `device_id` / `id` TXT stays optional.
+- **Reconciliation — OPEN:** the existing BLE `unique_id` is stored raw/uppercase; a `format_mac`'d zeroconf `mac` is lowercase; HA's compare is case-sensitive → **silent duplicate device** (§3.6.6). Choose (a) one-way `async_migrate_entry` normalizing all existing `unique_id`s + `(CONNECTION_BLUETOOTH, …)` tuples to `format_mac` (recommended, ESPHome-style), or (b) match the raw form on the zeroconf side. **Must be closed before WiFi discovery ships to the field.**
+
+### D4 — Plaintext channel scope — **OPEN**
+
+On the plaintext 2446 channel, is the **full** control plane served (draw + `ENTER_DFU`/`CONFIG_WRITE`/`REBOOT`/`POWER_OFF`), or is plaintext scoped to the **data plane** with privileged control gated to the TLS port / BLE (§3.4b, currently "optional")? Materially different security postures. Also decide the two near-free hardenings: **write-only secrets** on `CONFIG_READ` (§3.4a — recommend yes) and opcode-scoping.
+
+### D5 — Phase-1 concurrency scope — **OPEN**
+
+The stated goal is "BLE and WiFi simultaneously active," but Phase 1 ships **serialize-everything** (single per-MAC lock across both transports); true concurrency waits for F4 (Phase 3). Decide: is transport-*choice*-with-mutual-exclusion an acceptable v1, or is F4 pulled forward so the MVP delivers actual concurrency? Set expectations explicitly either way.
+
+### D6 — Connection lifecycle — **OPEN**
+
+**Persistent** HA↔device TCP connection vs **connect-per-delivery**. Determines TLS handshake amortization (persistent favors TLS — one handshake, many pushes), keepalive design, and how the per-transport session rules apply. Unspecified today; pick a model.
+
+### D7 — Python TLS-PSK client — **OPEN (verify)**
+
+py-opendisplay's TLS client needs **Python 3.13+** stdlib PSK callbacks, or an `sslpsk`/mbedTLS shim. Verify the target HA runtime's Python; if <3.13, choose a shim (packaging/maintenance cost) or defer TLS (Phase 1b) until 3.13 is baseline. Gates the client half of encrypted WiFi.
+
+### D8 — MVP provisioning path — **OPEN**
+
+`CMD_NET_JOIN`/`CMD_NET_STATUS` (F3 — clean join + async feedback) vs the interim **config-write + reboot** for v1. Decide whether F3 is pulled into Phase 1 or fire-and-pray provisioning is acceptable initially. (BLE is always the provisioning channel per D1.)
+
+### D9 — PR #89 `LANConnection` — **OPEN**
+
+Reuse the existing `feat/tcp` branch's `LANConnection` as the base for P3 `TcpTransport`, or supersede it. Review against the P1 `Transport` shape first.
+
+### Priority
+
+Close **D2** (hardware-validate the tuned TLS build) and **D3-reconciliation** (correctness-critical, gets harder once field entries exist) first. **D4** and **D5** are product-scope calls the owner should make deliberately. **D6/D7/D8/D9** are cheap to close with a little investigation.
