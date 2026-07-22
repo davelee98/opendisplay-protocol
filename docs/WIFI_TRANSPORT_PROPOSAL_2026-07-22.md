@@ -10,6 +10,14 @@
 
 **Goal:** WiFi as a full transport between Home Assistant and OpenDisplay tags. **Both transports are available (listening) at once, but the device services only one client at a time** — there is no concurrent-session requirement (see §8 D5).
 
+### Design principles
+
+These constrain every change below:
+
+1. **Minimize firmware change.** The device already ships a working WiFi transport, so prefer **reusing existing mechanisms** over new subsystems — the shipped LAN server, `encryption_enabled`, the `0x26` credential path, the DIRECT_WRITE image path, and the existing session/eviction logic. Each firmware item (F1–F6) is scoped to the smallest change that works; **new behavior lands host-side (py-opendisplay + HA) wherever it possibly can.** Firmware is the highest-cost, hardest-to-update tier (four repos, per-target toolchains, field devices), so it changes least.
+2. **Perfect backward compatibility.** Existing deployments must keep working **byte-for-byte**: never renumber or alter a shipped opcode or struct (the 0x52/0x53 lesson); old firmware silently drops unknown opcodes; old clients ignore new mDNS TXT keys and the new TLS port; an encryption-off tag keeps serving plaintext on 2446 exactly as today. All protocol work is additive ⇒ MINOR bump only. The **one** behavior *removed* — cross-transport response fan-out (dual-delivery) — cannot affect any *correct* client, since no legitimate client relies on receiving responses to commands it never issued; it is a bug fix, not a break (§8 D5).
+3. **WiFi is additive to a BLE-capable base** (§1.6 / §8 D1); **one client at a time, request+response over the same pipe, disconnect aborts work** (§8 D5).
+
 ---
 
 ## 1. Where we actually are (synthesis of the four audits)
@@ -194,7 +202,7 @@ Option (a) (normalize everywhere, ESPHome's approach) is recommended. Whichever 
 
 ## 4. Firmware changes (ESP32 envs of `Firmware` only)
 
-Ordered; items F1–F3 are the Phase-1 enablers, F4–F6 are later phases (2–3).
+Ordered; items F1–F3 are the Phase-1 enablers, F4–F6 are later phases (2–3). Per the design principles, every item is scoped to the smallest **backward-compatible** change — reusing shipped mechanisms and adding nothing an old client or old firmware can't ignore; new behavior lands host-side wherever possible.
 
 - **F1 — mDNS identity/capability TXT** (`wifi_service.cpp:51,73`): implement the full record set + TXT keys per **§3.6** (`mac`, `tls`, `fw`, `cm`, optional `id`/`pv`). Pure additive; unblocks HA identity unification (G4). Note `mac` must be the **actual advertised BLE address**, not the eFuse/WiFi MAC (§3.6.5). *Small.*
 - **F2 — Port/mode selection** (`initWiFi()` / `handleWiFiServer()`, `wifi_service.cpp:85,170`): read the existing `SecurityConfig.encryption_enabled` and open **exactly one** listener — plaintext on 2446 when `0`, TLS-PSK on 2447 (mbedTLS, PSK from the master-key KDF) when `1`. Advertise the active port + `tls` TXT in mDNS. Also stop logging SSID/PSK (`config_parser.cpp:544-546`, `wifi_service.cpp:105`). Optional (recommended): redact the master key/PSK in the `CONFIG_READ` response (`handleReadConfig`, `communication.cpp:350`). *Plaintext path small; TLS path medium (mbedTLS + buffer tuning on C6 — see RAM doc).*
@@ -256,7 +264,7 @@ Principle: **WiFi is a second transport under the existing MAC-keyed identity �
 - **PR #89 (`LANConnection`)** should be reviewed against the P1 Transport shape before writing fresh code — reuse or supersede deliberately.
 - **Silent unknown-opcode drop** means capability probing is timeout-based on old firmware; clients must fall back cleanly (P5/H5 must handle "NET opcodes unsupported").
 - **WiFi target scope is C6 + S3 only** (C3 excluded). This isn't enforced today — the only gate is `-DTARGET_ESP32`, which is set on the C3 envs too, so C3 currently compiles/serves WiFi. Add a dedicated `-DOPENDISPLAY_ENABLE_WIFI` on the S3/C6 envs and guard `wifi_service.cpp` on it, to enforce scope and reclaim RAM on C3.
-- **TLS on C6-N4 is the RAM risk, not the plaintext path.** Per the RAM doc, concurrent BLE + WiFi + a default mbedTLS handshake is marginal on C6-N4; TLS-PSK/2447 needs `MBEDTLS_SSL_IN/OUT_CONTENT_LEN` cut to ~4–6 KB + MFL + `largest_free_block` validation on hardware. The plaintext 2446 path has no such issue. S3's PSRAM makes TLS comfortable.
+- **TLS on C6-N4 is an objective met by tuning (§8 D2), not a risk of infeasibility.** The *default* mbedTLS is marginal on C6-N4, but the trimmed build (asymmetric IN/OUT record buffers, PSK-only, static pre-alloc) fits in ~8–12 KB; the remaining work is on-hardware `largest_free_block` validation. The plaintext 2446 path has no such issue; S3's PSRAM makes TLS comfortable.
 - **No forced-encryption behavior change.** WiFi mode is opt-in via the pre-existing `encryption_enabled` flag; a tag left with encryption off serves plaintext 2446 exactly as an operator would expect. No existing deployment is forced into auth.
 - **Same-pipe response routing (F4)** removes today's cross-transport dual-delivery fan-out: a response now returns only on the transport its request arrived on (§8 D5). Technically an observable behavior change for any client that relied on the fan-out; treated as a bug fix.
 
@@ -273,15 +281,15 @@ Decisions that still need an owner's call — distinct from the settled question
 - The **provisioning bootstrap problem dissolves** — BLE (`0x26` config-write, later `CMD_NET_JOIN`) is always available to deliver WiFi credentials. No SoftAP/captive-portal/Improv subsystem is needed.
 - **BLE + WiFi always coexist**; NimBLE cannot be torn down to reclaim RAM, so the C6-N4 TLS budget must be met by mbedTLS tuning (D2), not by dropping BLE. `WIFI_ONLY_DEVICE_FEASIBILITY_2026-07-22.md` (variants A/B) is retained as background only.
 
-### D2 — TLS viability on C6-N4 — **OPEN (tractable; validate on hardware)**
+### D2 — TLS on C6-N4 — **RESOLVED: an objective; tune mbedTLS to fit**
 
-Fork: is `encryption_enabled=1` (TLS-PSK / 2447) a **universal** capability or **S3-only**? The RAM doc rates *default* mbedTLS marginal on C6-N4 (no PSRAM), and per D1 BLE cannot be freed to make room. Approach — a trimmed mbedTLS build:
-- **Asymmetric record buffers**: `MBEDTLS_SSL_IN_CONTENT_LEN ≈ 4096` / `OUT_CONTENT_LEN ≈ 1024` (device receives large DIRECT_WRITE chunks, sends tiny ACKs) — saves ~27 KB vs the 32 KB default. Client (py-opendisplay) must `SSL_write` in ≤ IN_CONTENT_LEN chunks (already ≤4094), so this holds even without RFC 6066 MFL support in the Python client.
+**TLS-PSK on C6-N4 (2447) is a target, not an open go/no-go.** `encryption_enabled=1` is a **universal** capability across S3 **and** C6; the C6 build is tuned as needed to fit, rather than declaring TLS S3-only. Per D1, BLE cannot be freed to make room, so the budget is met by trimming mbedTLS. Required trims (the *default* mbedTLS is marginal on C6-N4's no-PSRAM budget):
+- **Asymmetric record buffers**: `MBEDTLS_SSL_IN_CONTENT_LEN ≈ 4096` / `OUT_CONTENT_LEN ≈ 1024` (device receives large DIRECT_WRITE chunks, sends tiny ACKs) — saves ~27 KB vs the 32 KB default. py-opendisplay must `SSL_write` in ≤ IN_CONTENT_LEN chunks (already ≤4094), so this holds even without RFC 6066 MFL in the Python client.
 - PSK-only (compile out X.509/RSA/DHE), single ECDHE-PSK ciphersuite, no session tickets/renegotiation/resumption.
 - **Statically pre-allocate the TLS context at boot** to eliminate the handshake-time heap-fragmentation spike (the actual C6 risk, not raw total RAM).
 - Estimated **~8–12 KB** vs ~35 KB default peak → fits the measured C6-N4 free RAM with BLE up.
 
-**Decision needed:** commit to this tuned build + on-hardware `largest_free_block` validation (recommended), or declare TLS **S3-only** and define what a C6 does when `encryption_enabled=1`. (No zlib-window concern: `OPENDISPLAY_ZLIB_WINDOW_BITS` is commented out on C6/S3 — only `esp32-s3-E1004` enables the 32 KB window — so the compression window is ~512 B on C6 and is not part of the TLS peak.) ECDHE-PSK vs plain-PSK is the fallback lever (drops ECC RAM/CPU at the cost of forward secrecy) only if still tight.
+**Remaining work (execution, not a decision):** implement the tuned build and **validate `largest_free_block` on real C6-N4 hardware**. (No zlib-window concern: `OPENDISPLAY_ZLIB_WINDOW_BITS` is commented out on C6/S3 — only `esp32-s3-E1004` enables the 32 KB window — so the compression window is ~512 B on C6 and is not part of the TLS peak.) ECDHE-PSK vs plain-PSK is a fallback lever (drops ECC RAM/CPU at the cost of forward secrecy) only if hardware validation shows it's still tight.
 
 ### D3 — Identity: anchor & reconciliation — **PARTLY RESOLVED**
 
@@ -291,7 +299,7 @@ Fork: is `encryption_enabled=1` (TLS-PSK / 2447) a **universal** capability or *
 ### D4 — Plaintext channel scope & secrets hardening — **PARTLY RESOLVED**
 
 - **Write-only secrets — RESOLVED: no.** The master key / WiFi PSK are **not** redacted on `CONFIG_READ`; the stored config stays fully readable. Simplicity chosen over the marginal hardening.
-- **Channel scope — OPEN:** on the plaintext 2446 channel, is the **full** control plane served (draw + `ENTER_DFU`/`CONFIG_WRITE`/`REBOOT`/`POWER_OFF`), or is plaintext scoped to the **data plane** with privileged control gated to the TLS port / BLE (§3.4)? Materially different security postures — still to decide.
+- **Channel scope — OPEN:** on the plaintext 2446 channel, is the **full** control plane served (draw + `ENTER_DFU`/`CONFIG_WRITE`/`REBOOT`/`POWER_OFF`), or is plaintext scoped to the **data plane** with privileged control gated to the TLS port / BLE (§3.4)? Materially different security postures — still to decide. Note the *minimize-change / perfect-backward-compat* principle weighs **against** default opcode-scoping: restricting opcodes on plaintext would change behavior for any existing plaintext client that already uses them, so if adopted it should be **opt-in, not default**.
 
 ### D5 — Concurrent clients — **RESOLVED: not supported**
 
@@ -318,4 +326,4 @@ Reuse the existing `feat/tcp` branch's `LANConnection` as the base for P3 `TcpTr
 
 ### Priority
 
-Close **D2** (hardware-validate the tuned TLS build) and **D3-reconciliation** (correctness-critical, gets harder once field entries exist) first. **D4 channel-scope** is a product-scope call the owner should make deliberately. **D6/D7/D8/D9** are cheap to close with a little investigation. *Resolved:* D1 (no WiFi-only), D5 (no concurrent clients), D3-anchor (BLE MAC), D4-write-only-secrets (no).
+**D3-reconciliation** (correctness-critical, gets harder once field entries exist) is the top open decision to close. **D4 channel-scope** is a product-scope call the owner should make deliberately. **D6/D7/D8/D9** are cheap to close with a little investigation. **D2** is now an objective — its remaining work is *implementing* the tuned TLS build and validating on C6 hardware, not a go/no-go. *Resolved:* D1 (no WiFi-only), D2 (TLS-on-C6 is a target), D5 (no concurrent clients), D3-anchor (BLE MAC), D4-write-only-secrets (no).
