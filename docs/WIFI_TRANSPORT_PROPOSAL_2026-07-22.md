@@ -1,0 +1,185 @@
+# WiFi Transport — Cross-Repo Implementation Proposal
+
+**Date:** 2026-07-22
+**Status:** Proposal (report-only task; no code changed)
+**Companion audits (same date, same docs/ folder):**
+- `WIFI_READINESS_PROTOCOL_2026-07-22.md` — wire-protocol audit
+- `WIFI_READINESS_FIRMWARE_2026-07-22.md` — Firmware (ESP32 + confirming pass over NRF54/Silabs/NRF)
+- `WIFI_READINESS_PY_OPENDISPLAY_2026-07-22.md` — py-opendisplay library audit
+- `WIFI_READINESS_HA_INTEGRATION_2026-07-22.md` — Home Assistant integration audit
+
+**Goal:** WiFi as a full transport between Home Assistant and OpenDisplay tags, with **BLE and WiFi permitted to be simultaneously active on one device**.
+
+---
+
+## 1. Where we actually are (synthesis of the four audits)
+
+The surprise headline from all four audits: **WiFi is not green-field.** The device end of the transport already ships and works:
+
+| Layer | State today |
+|---|---|
+| **Firmware (ESP32 S3/C3/C6)** | **Working.** `wifi_service.cpp`: WiFi STA + mDNS `_opendisplay._tcp` (TXT `msd`) + single-client TCP server on port **2446**. Inbound `[len:2 LE][payload≤4096]` frames feed the *same* `imageDataWritten()` dispatcher as BLE; responses fan out to both transports. **BLE (NimBLE) + WiFi already run concurrently** in `loop()`. Credentials arrive over BLE via the `wifi_config` TLV `0x26`, gated by `communication_modes` bit 2 (`OD_COMM_MODE_WIFI`). |
+| **Other firmwares (NRF54/Silabs/NRF)** | No WiFi hardware; correctly parse-and-skip `0x26`. Out of scope permanently. |
+| **Protocol header** | **Silent.** `opendisplay_protocol.h` (v2.1) contains zero WiFi/TCP/mDNS spec — only the `0x26 wifi` config-type comment line. The LAN framing, port, discovery, and session rules exist only as firmware behavior + agents notes. |
+| **py-opendisplay (7.13.0)** | **BLE-only.** No IP transport, no zeroconf, no transport abstraction — but the framing/crypto/PIPE layers are pure `bytes`-in/`bytes`-out, and the byte-pipe is isolated in one 439-line `BLEConnection` class. `WifiConfig` provisioning model exists (rides `write_config()` over BLE). An unmerged `LANConnection` exists on PR #89. |
+| **HA integration** | **BLE-only.** No zeroconf matcher, no network config-flow step, both connect paths hardcode `ble_device=`. Two forward-looking hooks exist: the transport-agnostic `notify_device_seen(source)` trigger (`delivery.py:16`) and diagnostics already redacting `ssid`/`password`/`server_url`. |
+
+**Conclusion:** the tag listens and advertises; nothing on the host side connects. The critical path runs through **py-opendisplay → HA integration**, with small enabling changes in **firmware** (identity + security + per-transport sessions) and a **protocol** promotion so the header remains the "implement a client from this file alone" contract.
+
+### Resolved design questions (settled by the audits)
+
+1. **Role model: HA-as-TCP-client, tag-as-TCP-server.** The firmware only implements the inbound server; `WifiConfig.server_host/server_port` (tag-dials-out) is parsed but dead. **Decision: keep host-connects-in**; mark `server_host/server_port` reserved-again (do not reuse the bytes). This resolves py-opendisplay's open Gap 6.
+2. **PIPE_WRITE does not apply over TCP.** The `0x0080–0x0082` SACK/reorder/window machinery exists purely to compensate BLE write-without-response loss. TCP already guarantees ordered, gap-free delivery. **Decision: over the network transport, stream via DIRECT_WRITE `0x0070/71/72` with chunks up to 4094 bytes** (the shipped LAN path). Make this normative in the header.
+3. **Identity: `device_id` + MSD are the canonical cross-transport identity; MAC and IP are locators.** HA's `unique_id` stays the BLE MAC (no migration), but correlation of a zeroconf discovery to a BLE entry uses a new firmware `mac` TXT record (ESPHome-proven pattern; the mDNS name today carries only 3 chip-id bytes).
+4. **WiFi security is port-selected by the existing `encryption_enabled` flag — no mandatory encryption, no new policy bit.** The device serves exactly one WiFi mode, chosen by `SecurityConfig.encryption_enabled`:
+   - **`encryption_enabled = 0` → unencrypted channel on TCP port 2446.** Plaintext framed opcodes and big-frame DIRECT_WRITE streaming; no handshake, no auth. This is the intended default for a trusted LAN (a no-auth "just push pixels" path), and it is the lowest-RAM option — no TLS buffers on the hot path (matters on C6).
+   - **`encryption_enabled = 1` → TLS-PSK channel on TCP port 2447.** The PSK is derived from the existing 16-byte `SecurityConfig` master key (`tls_psk = KDF(master_key, "opendisplay-tls-psk")` via the existing CMAC KDF); the TLS handshake provides mutual auth, so no separate app-layer `AUTHENTICATE` runs over TLS. Port 2446 is **not** served in this mode.
+   The port number itself signals the mode; the client and mDNS advert disambiguate without probing. The two modes are mutually exclusive per device — a tag is either plaintext-2446 or TLS-2447. This drops the earlier `require_auth_on_ip` policy: one existing flag is the whole switch.
+5. **Simultaneous BLE+WiFi:** already real in firmware, but under-specified. Rules to adopt (protocol §5 below): per-transport auth sessions; one active stateful write-session per device across all transports; responses delivered only on the originating transport (ending today's dual-delivery fan-out).
+
+### Reconciling the one disagreement between audits
+
+The HA audit recommends keeping a **single per-MAC host lock** covering both transports; the firmware/protocol audits recommend **per-transport sessions** enabling true concurrency. Both are right, at different phases:
+
+- **Phase 1 (current firmware in the field):** firmware holds one global encryption session and `clearEncryptionSession()` on every LAN connect — so a WiFi client genuinely clobbers a BLE session. The host **must** serialize: keep the existing per-MAC lock and hold it for *either* transport.
+- **Phase 2 (after firmware ships per-transport sessions + the cross-transport write-session NACK):** the host lock can relax to "serialize stateful write-sessions only," letting e.g. a WiFi upload and a BLE LED flash proceed concurrently. Gate the relaxation on firmware version / `CMD_NET_CAPS`.
+
+---
+
+## 2. Target architecture
+
+```
+                        Home Assistant integration
+        config_flow: bluetooth step ──┐  ┌── zeroconf step (_opendisplay._tcp, mac TXT)
+                                      ▼  ▼
+                     one config entry, unique_id = BLE MAC
+                                      │
+                 transport resolver (prefer WiFi → BLE → queue)
+                     per-MAC device lock (phase 1: both transports)
+                                      │
+                              py-opendisplay
+                 OpenDisplayDevice(transport=…)   ← Transport Protocol
+                    ├── BleTransport (ex-BLEConnection; max_frame 244)
+                    └── TcpTransport ([len:2 LE] framer; max_frame 4096)
+                         ├── plaintext  → :2446   (encryption_enabled = 0)
+                         └── TLS-PSK    → :2447   (encryption_enabled = 1)
+                                      │ identical opcode frames
+              ┌───────────────────────┴───────────────────────┐
+        BLE GATT 0x2446                          TCP :2446 (plain) | :2447 (TLS-PSK)
+              └───────────────► ESP32 firmware ◄──────────────┘
+                    imageDataWritten() — shared opcode dispatch
+                    mode chosen by SecurityConfig.encryption_enabled
+                    per-transport encryption sessions (phase 2)
+```
+
+---
+
+## 3. Protocol changes (opendisplay-protocol) — the foundation
+
+All additive ⇒ **MINOR bump 2.1 → 2.2**. Never renumber a shipped opcode (0x52/0x53 lesson). Verified safe: old firmware silently drops unknown opcodes (`Firmware/src/communication.cpp:693-695`), so clients must treat response-timeout as "unsupported" and fall back.
+
+### 3.1 New SECTION 9 — "NETWORK TRANSPORT (LAN)" (normative, documents shipped behavior)
+
+Constants: `OD_LAN_TCP_PORT 2446` (plaintext), `OD_LAN_TLS_PORT 2447` (TLS-PSK), `OD_LAN_MAX_PAYLOAD 4096`, frame = `[len:2 LE][payload]`, `OD_LAN_MDNS_SERVICE "_opendisplay._tcp"`, `OD_LAN_READ_TIMEOUT_S 30`. Normative rules:
+1. **Mode is selected by the existing `SecurityConfig.encryption_enabled` field** (config packet `0x27`, already read by firmware `isEncryptionEnabled()` — this is not a new field). `encryption_enabled = 0` → serve **plaintext on 2446 only**. `encryption_enabled = 1` → serve **TLS-PSK on 2447 only**. The two are mutually exclusive; the device never serves both ports at once.
+2. PIPE `0x0080–0x0082` **MUST NOT** be used on the network transport; stream via DIRECT_WRITE with chunks ≤ `OD_LAN_MAX_PAYLOAD − 2` (applies to both modes; over TLS the framing is inside the TLS session).
+3. One network client at a time; a new connection evicts the prior **and clears only that transport's session**.
+4. TLS-PSK (2447): PSK derived from the `SecurityConfig` master key via the existing CMAC KDF; prefer an **ECDHE-PSK** ciphersuite (or TLS 1.3) for forward secrecy; the TLS handshake is the authentication, so app-layer `AUTHENTICATE` (0x50) is not used on this port.
+5. `device_id` (4 B) + MSD (16 B; mDNS `msd` TXT = 14 B) are the cross-transport identity; MAC/IP are locators.
+6. mDNS TXT keys: `msd` (existing), plus new `mac` (full BLE MAC, lowercase hex), `fw` (version), `cm` (communication_modes), `tls` (0/1 — which mode/port is live). The advertised SRV port is 2446 or 2447 to match.
+
+### 3.2 New opcode band `0x0054–0x005F` — NETWORK/SESSION (adjacent to auth/power)
+
+| Opcode | Name | Purpose |
+|---|---|---|
+| `0x0054` | `CMD_NET_STATUS` | Query runtime WiFi state: `[status][0x54][comm_modes:1][wifi_state:1][ipv4:4][port:2 LE][rssi:1]`. `wifi_state`: 0 idle / 1 connecting / 2 associated / 3 auth-fail / 4 no-AP / 5 got-IP. **Plaintext-readable** (like `0x43`) so a BLE client can discover the WiFi endpoint. |
+| `0x0055` | `CMD_NET_JOIN` | Provision + join now (no config rewrite/reboot): `[enc_type:1][ssid_len:1][ssid][psk_len:1][psk]`; ACK on accept, async result as a `0x0054`-shaped notification. Also persists to the `0x26` store. |
+| `0x0056` | `CMD_NET_FORGET` | Wipe WiFi creds + drop association + clear the WiFi-side session; other config untouched. |
+| `0x0057` | `CMD_NET_CAPS` | Capability descriptor: transports bitmap, max LAN frame, PIPE-over-IP=0, keepalive interval, **wifi mode (plaintext-2446 / tls-2447) + active port**, **per-transport-session support flag** (the phase-2 gate). |
+| `0x0058–0x5F` | reserved | WS upgrade, extended TLS descriptor, static IP, multi-AP. |
+
+### 3.3 Config + capability fields
+
+- **No new policy field.** WiFi mode is driven entirely by the **pre-existing** `SecurityConfig.encryption_enabled` (packet `0x27`): 0 → plaintext/2446, 1 → TLS-PSK/2447. (The earlier `0x2D network_policy` / `require_auth_on_ip` proposal is dropped — it is unnecessary once the existing flag selects the port/mode. If a keepalive interval is ever wanted, add it to `CMD_NET_CAPS`, not a new config packet.)
+- `WifiConfig 0x26`: keep as the persistent credential store; comment-deprecate `server_host/server_port` back to reserved.
+- Transport capability lives in **`CommunicationModes`** (bit 2 exists; bits 3–7 free for e.g. WS) — **not** `device_flags` (hardware-init axis, wrong home).
+
+### 3.4 Security & simultaneity (normative prose)
+
+- **WiFi security is opt-in, not mandatory.** The mode is the operator's choice via the existing `SecurityConfig.encryption_enabled` flag: leaving it `0` yields the unencrypted 2446 channel (no auth, no handshake — fine for a trusted LAN); setting it `1` yields TLS-PSK on 2447 (encrypted + mutually authenticated). There is no forced-encryption requirement on the IP transport.
+- **Optional hardening, independent of the mode (recommended, costs nothing, not auth):** (a) make the stored AES master key and WiFi PSK **write-only** — have `handleReadConfig` zero those fields in the `CONFIG_READ` response so the transport can't hand out secrets; (b) on the plaintext 2446 channel, optionally scope which opcodes are served — allow the data plane (DIRECT_WRITE / status) while leaving privileged control (`ENTER_DFU`, `CONFIG_WRITE`, `POWER_OFF`, `REBOOT`) available only over BLE or the TLS port. Both bound the blast radius of an open channel without adding any friction to the no-auth draw path.
+- Per-transport auth sessions; a stateful START (image upload, chunked config) on one transport while another transport has an in-flight session **MUST be NACKed**; responses go only to the originating transport.
+
+### 3.5 Workflow
+
+Edit only `src/opendisplay_protocol.h`; then `gen_python_protocol.py --write/--check`, `gen_js_protocol.py --write/--check`, `sync_protocol_header.py --push` + `--check`. New constants (`OD_LAN_TLS_PORT 2447`) and the mode/port rule go in SECTION 9; no new config packet is needed (mode reuses the existing `SecurityConfig.encryption_enabled`). Changelog: "Unreleased (since 2.1)" bullets → roll to `2.2`.
+
+---
+
+## 4. Firmware changes (ESP32 envs of `Firmware` only)
+
+Ordered; items F1–F3 are the Phase-1 enablers, F4–F6 are Phase-2.
+
+- **F1 — mDNS identity/capability TXT** (`wifi_service.cpp:51,73`): add `mac`, `fw`, `cm`, `auth` TXT keys. Pure additive; unblocks HA identity unification (G4). *Small.*
+- **F2 — Port/mode selection** (`initWiFi()` / `handleWiFiServer()`, `wifi_service.cpp:85,170`): read the existing `SecurityConfig.encryption_enabled` and open **exactly one** listener — plaintext on 2446 when `0`, TLS-PSK on 2447 (mbedTLS, PSK from the master-key KDF) when `1`. Advertise the active port + `tls` TXT in mDNS. Also stop logging SSID/PSK (`config_parser.cpp:544-546`, `wifi_service.cpp:105`). Optional (recommended): redact the master key/PSK in the `CONFIG_READ` response (`handleReadConfig`, `communication.cpp:350`). *Plaintext path small; TLS path medium (mbedTLS + buffer tuning on C6 — see RAM doc).*
+- **F3 — NET opcodes** (`communication.cpp` dispatch): implement `0x0054/0x0055/0x0056/0x0057`. `0x0054` is the highest-value piece (BLE→WiFi endpoint discovery + provisioning feedback, replacing today's fire-and-pray config+reboot). *Medium.*
+- **F4 — Per-transport sessions** (`encryption_state.h`, `communication.cpp:534`): per-transport `EncryptionState`; `imageDataWritten` gains an origin tag (the `conn_hdl` arg is already unused); `sendResponse` routes to the originating transport instead of dual-delivering; cross-transport write-session NACK. Advertise via `CMD_NET_CAPS`. *Medium — the key simultaneity fix.*
+- **F5 — Power/coex posture**: `esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` after association; gate WiFi bring-up off battery `power_mode` (or an opt-in flag) so deep-sleep tags never associate (~80–100 mA is battery-incompatible); document C3/C6 single-antenna time-sharing. *Small.*
+- **F6 (optional) — WiFi OTA**: HTTP-pull or ArduinoOTA behind auth. *Later.*
+
+---
+
+## 5. py-opendisplay changes (the critical-path blocker)
+
+Concentrated in ~4 files + one new subpackage; **non-breaking minor release** (existing `mac_address=`/`ble_device=` call sites keep working).
+
+- **P1 — `Transport` Protocol** (`transport/base.py`): `connect/disconnect/write(data, *, response, drain_stale)/read(timeout)→one logical frame/drain/is_connected`, plus `max_frame` and `supports_write_without_response`. Contract: **`read()` returns exactly one protocol frame** (BLE gets this free per notification; TCP via the framer).
+- **P2 — `BleTransport`**: rehome `BLEConnection` behind the Protocol; keep `BLEConnection` exported as an alias; `max_frame=244`.
+- **P3 — `TcpTransport`** (`transport/ip.py`, optional `[wifi]` extra): `asyncio.open_connection`, `[len:2 LE]` framer with reassembly into a frame queue; `max_frame=4096`; `response`/`drain_stale` no-ops; `supports_write_without_response=False`. Start from PR #89's `LANConnection` if it survives review.
+- **P4 — Wire into `OpenDisplayDevice`**: `_conn` typed as `Transport`; selection in `__aenter__`: explicit `transport=` > `host=`/`port=` → Tcp > `mac_address=`/`ble_device=` → Ble (default). Replace `DEFAULT_MAX_FRAME` uses with `self._conn.max_frame`; gate WWR on the capability flag; rename `_on_ble_disconnect`→`_on_disconnect`. Upload path: when `max_frame > 244` use DIRECT_WRITE with LAN-sized chunks instead of PIPE (mirrors firmware's LAN path).
+- **P5 — Provisioning API**: `device.provision_wifi(ssid, password, encryption_type=…)` — patches only the `0x26` TLV + sets comm-modes bit 2 via existing `write_config()`; prefer `CMD_NET_JOIN`/`CMD_NET_STATUS` when firmware advertises them (F3) for join-now + status feedback. Implementable over BLE today.
+- **P6 — IP discovery** (`discovery_ip.py`, `[wifi]` extra): zeroconf browse of `_opendisplay._tcp.local.` returning `{name: (host, port, mac, msd)}`.
+- **P7 — Generalize naming**: transport-neutral exception aliases (`ConnectionError`/`TimeoutError` superclasses over the BLE-named ones), CLI `--host` + `provision-wifi` + `scan --lan`.
+- **Testing**: `FakeTransport` fixture (lets the whole PIPE/crypto suite run without bleak mocks — a standalone win); TCP framer round-trip tests (partial/coalesced/large reads); transport-selection tests; `provision_wifi` writes-only-0x26 test.
+
+---
+
+## 6. Home Assistant integration changes
+
+Principle: **WiFi is a second transport under the existing MAC-keyed identity — one config entry, one device, `unique_id` = BLE MAC.** Existing BLE-only entries need no migration (no `CONF_HOST` ⇒ resolver returns BLE ⇒ behavior unchanged).
+
+- **H1 — manifest**: add `"zeroconf": ["_opendisplay._tcp.local."]`; bump the py-opendisplay pin to the transport-capable release.
+- **H2 — config flow**: `async_step_zeroconf` reads the `mac` TXT (F1), `format_mac` → `async_set_unique_id(mac)` → `_abort_if_unique_id_configured(updates={CONF_HOST, CONF_PORT})` so a BLE-onboarded tag just gains `host`/`port` on rediscovery (ESPHome pattern, `core/…/esphome/config_flow.py:319-421`); WiFi-first onboarding creates the entry and later BLE discovery dedupes onto it. TCP-probe in `_async_test_connection`.
+- **H3 — transport resolver** used by both `services._async_connect_and_run` and `delivery._drain_once`: prefer TCP when `CONF_HOST` present and recently seen → BLE (`async_ble_device_from_address`) → queue. On mid-transfer WiFi failure, next retry attempt re-resolves (existing `MAX_DELIVERY_ATTEMPTS` cadence handles it).
+- **H4 — lock**: keep the single per-MAC lock and hold it across **both** transports (phase 1 — firmware shares one session). After F4 firmware ships, relax per `CMD_NET_CAPS` to serialize only stateful write-sessions.
+- **H5 — provisioning service** `opendisplay.configure_wifi(device_id, ssid, password, …)`: connect over BLE, `provision_wifi()` (P5), then poll `CMD_NET_STATUS` and surface join success/failure to the user.
+- **H6 — observability**: IP-address diagnostic sensor, "active transport" attribute, `host`/`port`/`communication_modes`/last-transport in diagnostics (redaction set already covers creds); optional WiFi liveness feeding `notify_device_seen("wifi")` (the hook already takes a source), low priority since WiFi tags are typically mains-powered and always reachable.
+
+---
+
+## 7. Phasing, ordering, and rollout
+
+**Phase 0 — Spec (opendisplay-protocol):** SECTION 9 (incl. `OD_LAN_TLS_PORT 2447` + the `encryption_enabled`→port/mode rule) + `0x0054–0x0057` + mDNS TXT spec; gen + sync + CI check. No new config packet. Everything downstream implements against this.
+
+**Phase 1 — Minimum viable WiFi transport, plaintext mode (serialize everything):**
+1. Firmware F1 (mDNS `mac`/`fw`/`cm`/`tls` TXT) + F2 (open the plaintext 2446 listener when `encryption_enabled = 0`).
+2. py-opendisplay P1–P4 + P6 → release (minor, `[wifi]` extra).
+3. HA H1–H3 + H4(strict single lock) → pin bump.
+   *Exit criteria:* a WiFi-enabled tag (encryption off) is discovered via zeroconf, merged onto its BLE entry, and `drawcustom` uploads over plaintext TCP/2446 with 4094-byte chunks (~17× fewer frames than BLE), falling back to BLE when WiFi is unreachable.
+
+**Phase 1b — TLS-PSK mode (2447):** Firmware serves TLS-PSK on 2447 when `encryption_enabled = 1` (mbedTLS + ECDHE-PSK, buffers tuned per the RAM doc); py-opendisplay TcpTransport connects TLS to 2447 when the advert says `tls=1` (needs Python 3.13+ stdlib PSK, or an `sslpsk`/mbedTLS shim — verify the target HA's Python). The client picks port/mode from the advertised `tls` flag; no handshake on the plaintext path.
+
+**Phase 2 — Provisioning UX + status:** Firmware F3 (`NET_STATUS/JOIN/FORGET/CAPS`), py-opendisplay P5/P7, HA H5–H6. Until F3 ships, provisioning falls back to config-write + reboot.
+
+**Phase 3 — True simultaneity:** Firmware F4 (per-transport sessions + cross-transport write NACK) + F5 (power posture); HA relaxes the device lock gated on `CMD_NET_CAPS`. Optional F6 (WiFi OTA).
+
+**Version coupling reminders:** HA `manifest.json` pins exact `py-opendisplay==`; a new py-opendisplay release precedes the HA changes. Header changes go through `sync_protocol_header.py --push/--check` into all four firmware copies (three of them only gain comments/constants they ignore).
+
+### Risks / open items
+
+- **PR #89 (`LANConnection`)** should be reviewed against the P1 Transport shape before writing fresh code — reuse or supersede deliberately.
+- **Silent unknown-opcode drop** means capability probing is timeout-based on old firmware; clients must fall back cleanly (P5/H5 must handle "NET opcodes unsupported").
+- **WiFi target scope is C6 + S3 only** (C3 excluded). This isn't enforced today — the only gate is `-DTARGET_ESP32`, which is set on the C3 envs too, so C3 currently compiles/serves WiFi. Add a dedicated `-DOPENDISPLAY_ENABLE_WIFI` on the S3/C6 envs and guard `wifi_service.cpp` on it, to enforce scope and reclaim RAM on C3.
+- **TLS on C6-N4 is the RAM risk, not the plaintext path.** Per the RAM doc, concurrent BLE + WiFi + a default mbedTLS handshake is marginal on C6-N4; TLS-PSK/2447 needs `MBEDTLS_SSL_IN/OUT_CONTENT_LEN` cut to ~4–6 KB + MFL + `largest_free_block` validation on hardware. The plaintext 2446 path has no such issue. S3's PSRAM makes TLS comfortable.
+- **No forced-encryption behavior change.** WiFi mode is opt-in via the pre-existing `encryption_enabled` flag; a tag left with encryption off serves plaintext 2446 exactly as an operator would expect. No existing deployment is forced into auth.
+- **Dual-delivery removal (F4)** is technically observable behavior change for any client that relied on cross-transport response fan-out; treated as a bug fix per protocol §3.4.
