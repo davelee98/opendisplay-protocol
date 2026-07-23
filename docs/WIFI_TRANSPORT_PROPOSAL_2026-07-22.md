@@ -251,7 +251,7 @@ Principle: **WiFi is a second transport under the existing MAC-keyed identity �
 3. HA H1–H3 + H4(strict single lock) → pin bump.
    *Exit criteria:* a WiFi-enabled tag (encryption off) is discovered via zeroconf, merged onto its BLE entry, and `drawcustom` uploads over plaintext TCP/2446 with 4094-byte chunks (~17× fewer frames than BLE), falling back to BLE when WiFi is unreachable.
 
-**Phase 1b — TLS-PSK mode (2447):** Firmware serves TLS-PSK on 2447 when `encryption_enabled = 1` (mbedTLS + ECDHE-PSK, buffers tuned per the RAM doc); py-opendisplay TcpTransport connects TLS to 2447 when the advert says `tls=1` (needs Python 3.13+ stdlib PSK, or an `sslpsk`/mbedTLS shim — verify the target HA's Python). The client picks port/mode from the advertised `tls` flag; no handshake on the plaintext path.
+**Phase 1b — TLS-PSK mode (2447):** Firmware serves TLS-PSK on 2447 when `encryption_enabled = 1` (mbedTLS + ECDHE-PSK, buffers tuned per the RAM doc); py-opendisplay TcpTransport connects TLS to 2447 when the advert says `tls=1` (HA targets Python 3.14+, so stdlib `ssl` PSK callbacks are used natively — no shim, §8 D7). The client picks port/mode from the advertised `tls` flag; no handshake on the plaintext path.
 
 **Phase 2 — Provisioning UX + status:** Firmware F3 (`NET_STATUS/JOIN/FORGET/CAPS`), py-opendisplay P5/P7, HA H5–H6. Until F3 ships, provisioning falls back to config-write + reboot.
 
@@ -315,9 +315,9 @@ Asymmetric by side:
 - **Firmware side — MUST allow persistent.** The LAN server must **not force per-delivery semantics**: a client may hold the connection open across many operations. The device keeps a live client's connection open (the self-extend awake-window already does this) and must not drop a persistent-but-idle client that stays within the **keepalive interval advertised in `CMD_NET_CAPS`** — `OD_LAN_READ_TIMEOUT_S` is the no-keepalive drop bound, reset by any traffic (including a keepalive `CMD_NET_STATUS`). This costs nothing extra (static TLS pre-alloc reserves the buffers regardless) and lets non-HA clients (the CLI, a future app) use a persistent session while HA itself stays per-delivery.
 - **Design note — future persistent-with-idle-timer state (allow for it now).** The design **must not foreclose** HA later evolving from strict per-delivery to a **persistent connection governed by a host-side idle timer**: hold the connection open after a delivery and close it only after N seconds of inactivity. This is a middle ground — it amortizes the TLS handshake across bursts of updates, yet still frees the single client slot and lets the device sleep once the timer fires. Because the firmware already *allows* persistent connections (keepalive-bounded, above), this future mode is a **purely host-side change requiring no protocol or firmware change**. Keep both the protocol and the firmware server free of per-delivery-only assumptions so this path stays open.
 
-### D7 — Python TLS-PSK client — **OPEN (verify)**
+### D7 — Python TLS-PSK client — **RESOLVED: native stdlib PSK available**
 
-py-opendisplay's TLS client needs **Python 3.13+** stdlib PSK callbacks, or an `sslpsk`/mbedTLS shim. Verify the target HA runtime's Python; if <3.13, choose a shim (packaging/maintenance cost) or defer TLS (Phase 1b) until 3.13 is baseline. Gates the client half of encrypted WiFi.
+Verified against the HA core checkout (v2026.7.2): HA requires **Python ≥ 3.14.2** (`homeassistant/const.py` `REQUIRED_PYTHON_VER = (3, 14, 2)`; `pyproject.toml` `requires-python = ">=3.14.2"`; `.python-version` = 3.14.5) — well past the 3.13 release where `ssl.SSLContext.set_psk_client_callback` landed in the stdlib. So py-opendisplay's TLS-PSK client uses **stdlib `ssl` directly — no `sslpsk`/mbedTLS shim, no deferral.**
 
 ### D8 — MVP provisioning path — **RESOLVED: config-write + reboot for MVP; live reconfig later**
 
@@ -330,8 +330,7 @@ Do **not** reuse the `feat/tcp` branch's `LANConnection` code. Implement P3 `Tcp
 
 ### Priority
 
-**All product/design decisions are now resolved.** What remains is **execution / verification**, not forks:
+**All decisions are resolved.** The only remaining item is **execution**, not a fork:
 - **D2** — implement the uniform tuned mbedTLS build (asymmetric IN/OUT buffers + static pre-alloc, all targets) and validate `largest_free_block` on real C6-N4 hardware.
-- **D7** — verify HA's Python version (3.13+ for stdlib TLS-PSK); pick an `sslpsk`/mbedTLS shim or defer the TLS *client* if older. (The plaintext path is unaffected.)
 
-*Resolved:* D1 (no WiFi-only), D2 (TLS-on-C6 is a target), D3 (BLE-MAC anchor; match-existing-raw-format reconciliation, no migration), D4 (write-only-secrets no; plaintext full control plane), D5 (no concurrent clients), D6 (HA per-delivery; firmware allows persistent), D8 (config-write+reboot MVP; live reconfig later), D9 (implement from scratch).
+*Resolved:* D1 (no WiFi-only), D2 (TLS-on-C6 is a target), D3 (BLE-MAC anchor; match-existing-raw-format reconciliation, no migration), D4 (write-only-secrets no; plaintext full control plane), D5 (no concurrent clients), D6 (HA per-delivery; firmware allows persistent), D7 (native stdlib TLS-PSK; HA on Python 3.14+), D8 (config-write+reboot MVP; live reconfig later), D9 (implement from scratch).
