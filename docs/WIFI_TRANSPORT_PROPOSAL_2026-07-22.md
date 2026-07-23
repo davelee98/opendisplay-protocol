@@ -192,11 +192,11 @@ HA identity matching (`async_set_unique_id` + `_abort_if_unique_id_configured`) 
 
 Note the *only* difference here is letter case (BlueZ already emits colon-separated 17-char form, which `format_mac` merely lowercases — it changes nothing else); but a lone case difference is sufficient to break the match. The `mac` value format published in the TXT is not itself the fix — the reconciliation must happen on the HA side.
 
-**Required HA-side handling (integration, step H2):** normalize **both** sides to the same form before matching — run the `mac` TXT value **and** the stored BLE `unique_id` through `format_mac()`. In practice this means one of:
-- (a) migrate existing entries once via `async_migrate_entry` so `entry.unique_id = format_mac(entry.unique_id)` (and the `(CONNECTION_BLUETOOTH, address)` device-registry tuple, also stored raw/uppercase), then set `async_set_unique_id(format_mac(mac))` on **both** the bluetooth and zeroconf steps; or
-- (b) if migration is undesirable, have the zeroconf step match against the raw uppercase form the BLE path uses.
+**Chosen (§8 D3): option (b) — match the existing raw form, no migration.** The zeroconf step normalizes the `mac` TXT to the **same raw string the BLE path stores** and matches against it, leaving existing `unique_id`s untouched:
+- The `mac` TXT is lowercase-colon (§3.6.2); BlueZ's raw address is uppercase-colon; so the zeroconf step **uppercases** the TXT value — `async_set_unique_id(mac.upper())` — producing exactly what `async_step_bluetooth` stores for the same device.
+- The BLE and WiFi steps therefore converge on **identical** `unique_id` strings and `_abort_if_unique_id_configured` merges them onto one entry.
 
-Option (a) (normalize everywhere, ESPHome's approach) is recommended. Whichever is chosen, the BLE and WiFi discovery steps MUST converge on **identical** `unique_id` strings, or MAC-based dedup fails.
+Option (a) — a one-way `async_migrate_entry` normalizing everything (and the `(CONNECTION_BLUETOOTH, …)` tuples) to `format_mac`, ESPHome-style — stays available as a **future cleanup** but is **not** done now. Whichever is used, the BLE and WiFi steps MUST produce **identical** `unique_id` strings or MAC-based dedup fails.
 
 ---
 
@@ -233,7 +233,7 @@ Concentrated in ~4 files + one new subpackage; **non-breaking minor release** (e
 Principle: **WiFi is a second transport under the existing MAC-keyed identity — one config entry, one device, `unique_id` = BLE MAC.** Existing BLE-only entries need no migration (no `CONF_HOST` ⇒ resolver returns BLE ⇒ behavior unchanged).
 
 - **H1 — manifest**: add `"zeroconf": ["_opendisplay._tcp.local."]`; bump the py-opendisplay pin to the transport-capable release.
-- **H2 — config flow**: `async_step_zeroconf` reads the `mac` TXT (F1), `format_mac` → `async_set_unique_id(mac)` → `_abort_if_unique_id_configured(updates={CONF_HOST, CONF_PORT})` so a BLE-onboarded tag just gains `host`/`port` on rediscovery (ESPHome pattern, `core/…/esphome/config_flow.py:319-421`); WiFi-first onboarding creates the entry and later BLE discovery dedupes onto it. TCP-probe in `_async_test_connection`. **Must reconcile the raw/uppercase existing BLE `unique_id` with the `format_mac`'d zeroconf `mac` or dedup silently fails — see the mandatory §3.6.6 handling (normalize both sides, ideally via `async_migrate_entry`).**
+- **H2 — config flow**: `async_step_zeroconf` reads the `mac` TXT (F1), `format_mac` → `async_set_unique_id(mac)` → `_abort_if_unique_id_configured(updates={CONF_HOST, CONF_PORT})` so a BLE-onboarded tag just gains `host`/`port` on rediscovery (ESPHome pattern, `core/…/esphome/config_flow.py:319-421`); WiFi-first onboarding creates the entry and later BLE discovery dedupes onto it. TCP-probe in `_async_test_connection`. **Reconcile identity per §8 D3 / §3.6.6 — match the existing raw form: uppercase the `mac` TXT (`mac.upper()`) so the zeroconf `unique_id` equals the raw BLE `unique_id` exactly; no migration.**
 - **H3 — transport resolver** used by both `services._async_connect_and_run` and `delivery._drain_once`: prefer TCP when `CONF_HOST` present and recently seen → BLE (`async_ble_device_from_address`) → queue. On mid-transfer WiFi failure, next retry attempt re-resolves (existing `MAX_DELIVERY_ATTEMPTS` cadence handles it). Connection is opened **per delivery** and closed after the unit of work (§8 D6); a future persistent-with-idle-timer mode would be a host-side change only.
 - **H4 — lock**: keep the single per-MAC lock and hold it across **both** transports — this is the **permanent** model (one client at a time, §8 D5), not a phase-1 stopgap. No relaxation.
 - **H5 — provisioning service** `opendisplay.configure_wifi(device_id, ssid, password, …)`: connect over BLE, `provision_wifi()` (P5), then poll `CMD_NET_STATUS` and surface join success/failure to the user.
@@ -291,10 +291,10 @@ Decisions that still need an owner's call — distinct from the settled question
 
 **Remaining work (execution, not a decision):** implement the tuned build and **validate `largest_free_block` on real C6-N4 hardware**. (No zlib-window concern: `OPENDISPLAY_ZLIB_WINDOW_BITS` is commented out on C6/S3 — only `esp32-s3-E1004` enables the 32 KB window — so the compression window is ~512 B on C6 and is not part of the TLS peak.) ECDHE-PSK vs plain-PSK is a fallback lever (drops ECC RAM/CPU at the cost of forward secrecy) only if hardware validation shows it's still tight.
 
-### D3 — Identity: anchor & reconciliation — **PARTLY RESOLVED**
+### D3 — Identity: anchor & reconciliation — **RESOLVED**
 
-- **Anchor — RESOLVED:** the **BLE MAC** is the cross-transport identity anchor (guaranteed present per D1). The `device_id` / `id` TXT stays optional.
-- **Reconciliation — OPEN:** the existing BLE `unique_id` is stored raw/uppercase; a `format_mac`'d zeroconf `mac` is lowercase; HA's compare is case-sensitive → **silent duplicate device** (§3.6.6). Choose (a) one-way `async_migrate_entry` normalizing all existing `unique_id`s + `(CONNECTION_BLUETOOTH, …)` tuples to `format_mac` (recommended, ESPHome-style), or (b) match the raw form on the zeroconf side. **Must be closed before WiFi discovery ships to the field.**
+- **Anchor:** the **BLE MAC** is the cross-transport identity anchor (guaranteed present per D1). The `device_id` / `id` TXT stays optional.
+- **Reconciliation — match the existing raw MAC format (no migration, for now).** The existing BLE `unique_id` is stored raw exactly as BlueZ reports it (**uppercase, colon-separated**); the zeroconf step normalizes the `mac` TXT to that **same raw form** and matches against it — no `async_migrate_entry`, existing entries untouched. Since the `mac` TXT is published lowercase-colon (§3.6.2) and BlueZ's raw form is uppercase-colon, the zeroconf step **uppercases** the TXT value (`mac.upper()`) so `async_set_unique_id` / `_abort_if_unique_id_configured` matches the existing BLE entry exactly. **Caveat / future cleanup:** this ties matching to BlueZ's uppercase-colon form (fine — HA runs on BlueZ). Migrating everything to `format_mac` (option a, ESPHome-style) stays available as a later cleanup if a non-BlueZ backend or a cleaner canonical form is ever wanted; not needed now.
 
 ### D4 — Plaintext channel scope & secrets hardening — **RESOLVED**
 
@@ -330,4 +330,8 @@ Do **not** reuse the `feat/tcp` branch's `LANConnection` code. Implement P3 `Tcp
 
 ### Priority
 
-**D3-reconciliation** (correctness-critical, gets harder once field entries exist) is the top — and now essentially only — open decision to close. **D7** is a quick verification (HA's Python version). **D2** is an objective — remaining work is *implementing* the tuned TLS build and validating on C6 hardware, not a go/no-go. *Resolved:* D1 (no WiFi-only), D2 (TLS-on-C6 is a target), D4 (write-only-secrets no; plaintext serves full control plane), D5 (no concurrent clients), D6 (HA per-delivery; firmware allows persistent), D8 (config-write+reboot MVP; live reconfig later), D9 (implement from scratch), D3-anchor (BLE MAC).
+**All product/design decisions are now resolved.** What remains is **execution / verification**, not forks:
+- **D2** — implement the uniform tuned mbedTLS build (asymmetric IN/OUT buffers + static pre-alloc, all targets) and validate `largest_free_block` on real C6-N4 hardware.
+- **D7** — verify HA's Python version (3.13+ for stdlib TLS-PSK); pick an `sslpsk`/mbedTLS shim or defer the TLS *client* if older. (The plaintext path is unaffected.)
+
+*Resolved:* D1 (no WiFi-only), D2 (TLS-on-C6 is a target), D3 (BLE-MAC anchor; match-existing-raw-format reconciliation, no migration), D4 (write-only-secrets no; plaintext full control plane), D5 (no concurrent clients), D6 (HA per-delivery; firmware allows persistent), D8 (config-write+reboot MVP; live reconfig later), D9 (implement from scratch).
