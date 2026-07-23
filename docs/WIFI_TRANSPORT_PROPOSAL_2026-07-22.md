@@ -38,7 +38,7 @@ The surprise headline from all four audits: **WiFi is not green-field.** The dev
 
 1. **Role model: HA-as-TCP-client, tag-as-TCP-server.** The firmware only implements the inbound server; `WifiConfig.server_host/server_port` (tag-dials-out) is parsed but dead. **Decision: keep host-connects-in**; mark `server_host/server_port` reserved-again (do not reuse the bytes). This resolves py-opendisplay's open Gap 6.
 2. **PIPE_WRITE does not apply over TCP.** The `0x0080–0x0082` SACK/reorder/window machinery exists purely to compensate BLE write-without-response loss. TCP already guarantees ordered, gap-free delivery. **Decision: over the network transport, stream via DIRECT_WRITE `0x0070/71/72` with chunks up to 4094 bytes** (the shipped LAN path). Make this normative in the header.
-3. **Identity: the stable cross-transport identity is `device_id` (4 B); the MSD is NOT identity.** The 16-byte MSD (`MsdAdvertisement`, `Firmware/src/display_service.cpp:1707`) is **pure telemetry** — a config-driven sensor/touch area (`dynamic[11]`), chip temperature, battery voltage, and a status byte whose low nibble is a free-running main-loop *liveness counter*. Most of its bytes change every advertisement, and it contains **no `device_id` and no MAC**. So the `msd` mDNS TXT (mirroring 14 of those bytes) is a poor correlation token, and "device_id + MSD as identity" is wrong. Use a stable anchor instead: HA's `unique_id` stays the BLE MAC (no migration), and correlation of a zeroconf discovery to a BLE entry uses a **new firmware `mac` TXT record** (ESPHome-proven pattern; the mDNS name today carries only 3 chip-id bytes). Optionally expose `device_id` in a TXT for a transport-neutral id. MAC and IP are locators.
+3. **Identity: the BLE MAC is the anchor (always present per §8 D1); the MSD is NOT identity.** The 16-byte MSD (`MsdAdvertisement`, `Firmware/src/display_service.cpp:1707`) is **pure telemetry** — a config-driven sensor/touch area (`dynamic[11]`), chip temperature, battery voltage, and a status byte whose low nibble is a free-running main-loop *liveness counter*. Most of its bytes change every advertisement, and it contains **no `device_id` and no MAC**. So the `msd` mDNS TXT (mirroring 14 of those bytes) is a poor correlation token, and "device_id + MSD as identity" is wrong. Use a stable anchor instead: HA's `unique_id` **is the BLE MAC** (guaranteed present, no migration — §8 D3), and correlation of a zeroconf discovery to a BLE entry uses a **new firmware `mac` TXT record** (ESPHome-proven pattern; the mDNS name today carries only 3 chip-id bytes). `device_id` is an *optional* transport-neutral id (TXT `id`), not the primary anchor; IP is a locator.
 4. **WiFi security is port-selected by the existing `isEncryptionEnabled()` predicate — no mandatory encryption, no new policy bit.** The device serves exactly one WiFi mode, chosen by `SecurityConfig.encryption_enabled == 1` **and a non-zero master key** (i.e. `isEncryptionEnabled()`, `encryption.cpp:176`):
    - **`isEncryptionEnabled()` false → unencrypted channel on TCP port 2446.** This covers `encryption_enabled = 0` **and** the `encryption_enabled = 1`-but-blank-key case (no PSK ⇒ no TLS ⇒ plaintext). Plaintext framed opcodes and big-frame DIRECT_WRITE streaming; no handshake, no auth. The intended default for a trusted LAN (a no-auth "just push pixels" path), and the lowest-RAM option — no TLS buffers on the hot path (matters on C6).
    - **`isEncryptionEnabled()` true → TLS-PSK channel on TCP port 2447.** Requires the flag set **and** a provisioned non-zero master key. The PSK is derived from that 16-byte `SecurityConfig` master key (`tls_psk = KDF(master_key, "opendisplay-tls-psk")` via the existing CMAC KDF); the TLS handshake provides mutual auth, so no separate app-layer `AUTHENTICATE` runs over TLS. Port 2446 is **not** served in this mode.
@@ -65,7 +65,7 @@ Per §8 D5, the device services **one client at a time across both transports**;
                      one config entry, unique_id = BLE MAC
                                       │
                  transport resolver (prefer WiFi → BLE → queue)
-                     per-MAC device lock (phase 1: both transports)
+                     per-MAC device lock (permanent: both transports)
                                       │
                               py-opendisplay
                  OpenDisplayDevice(transport=…)   ← Transport Protocol
@@ -98,7 +98,7 @@ Constants: `OD_LAN_TCP_PORT 2446` (plaintext), `OD_LAN_TLS_PORT 2447` (TLS-PSK),
 2. PIPE `0x0080–0x0082` **MUST NOT** be used on the network transport; stream via DIRECT_WRITE with chunks ≤ `OD_LAN_MAX_PAYLOAD − 2` (applies to both modes; over TLS the framing is inside the TLS session).
 3. One network client at a time; a new connection evicts the prior **and clears only that transport's session**. A client **MAY** hold the connection open persistently across operations — the server keeps a live client connected and drops it only after `OD_LAN_READ_TIMEOUT_S` with no traffic (**any valid command resets the timer**, so a persistent client stays alive by sending commands within that window). HA uses connect-per-delivery; other clients may go persistent (§8 D6).
 4. TLS-PSK (2447): PSK derived from the `SecurityConfig` master key via the existing CMAC KDF; prefer an **ECDHE-PSK** ciphersuite (or TLS 1.3) for forward secrecy; the TLS handshake is the authentication, so app-layer `AUTHENTICATE` (0x50) is not used on this port. **Record buffers are asymmetric and small on all targets** (IN ≈ 4 KB / OUT ≈ 1 KB, §8 D2), so a client MUST fragment `SSL_write` to ≤ the device IN size (≤4094 B — already the DIRECT_WRITE chunk size); a larger TLS record will be rejected.
-5. Identity: `device_id` (4 B) is the stable cross-transport anchor. The **MSD is telemetry, not identity** — the 16-byte `MsdAdvertisement` (mDNS `msd` TXT = its 14-byte payload) carries volatile sensor/battery/temperature data plus a liveness counter and holds no `device_id` or MAC, so it must not be used to correlate a device across transports. Correlate via the `mac` TXT (below) or an explicitly-exposed `device_id`; MAC/IP are locators.
+5. Identity: the **BLE MAC is the cross-transport anchor** (always present — every device is BLE-capable, §8 D1); `device_id` (4 B) is an optional transport-neutral id. The **MSD is telemetry, not identity** — the 16-byte `MsdAdvertisement` (mDNS `msd` TXT = its 14-byte payload) carries volatile sensor/battery/temperature data plus a liveness counter and holds no `device_id` or MAC, so it must not be used to correlate a device across transports. Correlate via the `mac` TXT (below); IP is a locator.
 6. mDNS TXT keys: `msd` (existing), plus new `mac` (full BLE MAC, lowercase hex), `fw` (version), `cm` (communication_modes), `tls` (0/1 — which mode/port is live). The advertised SRV port is 2446 or 2447 to match. **Full DNS-SD record + TXT specification in §3.6.**
 
 ### 3.2 New opcodes — none
@@ -107,7 +107,7 @@ Constants: `OD_LAN_TCP_PORT 2446` (plaintext), `OD_LAN_TLS_PORT 2447` (TLS-PSK),
 
 ### 3.3 Config + capability fields
 
-- **No new policy field.** WiFi mode is driven entirely by the **pre-existing** `SecurityConfig.encryption_enabled` (packet `0x27`): 0 → plaintext/2446, 1 → TLS-PSK/2447. (The earlier `0x2D network_policy` / `require_auth_on_ip` proposal is dropped — it is unnecessary once the existing flag selects the port/mode. If a keepalive interval is ever wanted, make it a protocol constant or a config field — not a new opcode or config packet.)
+- **No new policy field.** WiFi mode is driven entirely by the **pre-existing** `isEncryptionEnabled()` predicate — `SecurityConfig.encryption_enabled == 1` **and** a non-zero master key (packet `0x27`): false → plaintext/2446, true → TLS-PSK/2447. (The earlier `0x2D network_policy` / `require_auth_on_ip` proposal is dropped — it is unnecessary once the existing flag selects the port/mode. If a keepalive interval is ever wanted, make it a protocol constant or a config field — not a new opcode or config packet.)
 - `WifiConfig 0x26`: keep as the persistent credential store; comment-deprecate `server_host/server_port` back to reserved.
 - Transport capability lives in **`CommunicationModes`** (bit 2 exists; bits 3–7 free for e.g. WS) — **not** `device_flags` (hardware-init axis, wrong home).
 
@@ -148,7 +148,7 @@ Each entry is a DNS-SD `key=value` string (RFC 6763; ≤255 B each):
 | Key | Presence | Value format | Example | Source | Stability |
 |---|---|---|---|---|---|
 | `mac` | **REQUIRED** (new) | lowercase, colon-separated BLE MAC `xx:xx:xx:xx:xx:xx` | `e8:9f:6d:12:34:56` | **actual advertised BLE address** — `NimBLEDevice::getAddress()` (ESP32) / `Bluefruit.getAddr()` (nRF); **NOT** `ESP.getEfuseMac()` | static |
-| `tls` | **REQUIRED** (new) | `0` \| `1` | `1` | `SecurityConfig.encryption_enabled` | semi-static |
+| `tls` | **REQUIRED** (new) | `0` \| `1` | `1` | `isEncryptionEnabled()` (flag + non-zero key) | semi-static |
 | `fw` | recommended (new) | `<major>.<minor>` | `1.4` | `CMD_FIRMWARE_VERSION` | changes on OTA |
 | `cm` | recommended (new) | 2 lowercase hex (comm-modes bitmask) | `05` | `SystemConfig.communication_modes` | config-static |
 | `id` | optional (new) | 8 lowercase hex (4-byte `device_id`) | `1a2b3c4d` | `device_id` | static |
@@ -163,7 +163,7 @@ The SRV `port` and the `tls` TXT are both derived from `isEncryptionEnabled()` (
 - `isEncryptionEnabled()` false — flag `0`, **or** flag `1` with a blank/zero key → SRV port **2446**, `tls=0` (plaintext).
 - `isEncryptionEnabled()` true → SRV port **2447**, `tls=1` (TLS-PSK).
 
-The device advertises **exactly one** service instance (one port) at a time. On an `encryption_enabled` change (config write), it re-registers the service on the new port with the updated SRV + `tls`.
+The device advertises **exactly one** service instance (one port) at a time. On a config write that changes `isEncryptionEnabled()` (the flag or the master key), it re-registers the service on the new port with the updated SRV + `tls`.
 
 #### 3.6.4 Update, throttling, and TTL rules
 
@@ -198,7 +198,7 @@ Option (a) — a one-way `async_migrate_entry` normalizing everything (and the `
 
 ## 4. Firmware changes (ESP32 envs of `Firmware` only)
 
-Ordered; items F1–F3 are the Phase-1 enablers, F4–F6 are later phases (2–3). Per the design principles, every item is scoped to the smallest **backward-compatible** change — reusing shipped mechanisms and adding nothing an old client or old firmware can't ignore; new behavior lands host-side wherever possible.
+Ordered; **F1–F2 are the Phase-1 enablers; F3 is a future enhancement (§8 D8); F4–F5 are Phase-2 hardening + power; F6 is optional.** Per the design principles, every item is scoped to the smallest **backward-compatible** change — reusing shipped mechanisms and adding nothing an old client or old firmware can't ignore; new behavior lands host-side wherever possible.
 
 - **F1 — mDNS identity/capability TXT** (`wifi_service.cpp:51,73`): implement the full record set + TXT keys per **§3.6** (`mac`, `tls`, `fw`, `cm`, optional `id`/`pv`). Pure additive; unblocks HA identity unification (G4). Note `mac` must be the **actual advertised BLE address**, not the eFuse/WiFi MAC (§3.6.5). *Small.*
 - **F2 — Port/mode selection** (`initWiFi()` / `handleWiFiServer()`, `wifi_service.cpp:85,170`): call the existing `isEncryptionEnabled()` (`encryption_enabled == 1` **and** non-zero master key, `encryption.cpp:176`) and open **exactly one** listener — plaintext on 2446 when false (incl. flag-set-but-blank-key), TLS-PSK on 2447 (mbedTLS, PSK from the master-key KDF) when true. Advertise the active port + `tls` TXT in mDNS. Also stop logging SSID/PSK (`config_parser.cpp:544-546`, `wifi_service.cpp:105`). The listener must **allow a persistent client** — keep a live connection open across operations, dropping only after `OD_LAN_READ_TIMEOUT_S` with no traffic (keepalive-bounded, §8 D6). *Plaintext path small; TLS path medium — mbedTLS with the uniform tuned config on **all** targets: asymmetric IN≈4 KB/OUT≈1 KB record buffers + statically pre-allocated buffers (§8 D2). Load-bearing on C6; applied on S3 too for one config, one client contract.*
@@ -229,7 +229,7 @@ Concentrated in ~4 files + one new subpackage; **non-breaking minor release** (e
 Principle: **WiFi is a second transport under the existing MAC-keyed identity — one config entry, one device, `unique_id` = BLE MAC.** Existing BLE-only entries need no migration (no `CONF_HOST` ⇒ resolver returns BLE ⇒ behavior unchanged).
 
 - **H1 — manifest**: add `"zeroconf": ["_opendisplay._tcp.local."]`; bump the py-opendisplay pin to the transport-capable release.
-- **H2 — config flow**: `async_step_zeroconf` reads the `mac` TXT (F1), `format_mac` → `async_set_unique_id(mac)` → `_abort_if_unique_id_configured(updates={CONF_HOST, CONF_PORT})` so a BLE-onboarded tag just gains `host`/`port` on rediscovery (ESPHome pattern, `core/…/esphome/config_flow.py:319-421`); WiFi-first onboarding creates the entry and later BLE discovery dedupes onto it. TCP-probe in `_async_test_connection`. **Reconcile identity per §8 D3 / §3.6.6 — match the existing raw form: uppercase the `mac` TXT (`mac.upper()`) so the zeroconf `unique_id` equals the raw BLE `unique_id` exactly; no migration.**
+- **H2 — config flow**: `async_step_zeroconf` reads the `mac` TXT (F1), `async_set_unique_id(mac.upper())` (match the raw BLE form — §3.6.6, D3) → `_abort_if_unique_id_configured(updates={CONF_HOST, CONF_PORT})` so a BLE-onboarded tag just gains `host`/`port` on rediscovery (ESPHome pattern, `core/…/esphome/config_flow.py:319-421`); WiFi-first onboarding creates the entry and later BLE discovery dedupes onto it. TCP-probe in `_async_test_connection`. **Reconcile identity per §8 D3 / §3.6.6 — match the existing raw form: uppercase the `mac` TXT (`mac.upper()`) so the zeroconf `unique_id` equals the raw BLE `unique_id` exactly; no migration.**
 - **H3 — transport resolver** used by both `services._async_connect_and_run` and `delivery._drain_once`: **prefer WiFi whenever the device is reachable over it** (`CONF_HOST` present and recently seen via mDNS) → then **BLE** (`async_ble_device_from_address`) → queue. WiFi is preferred because it is materially faster (4094-byte frames vs BLE's 244 — ~17× fewer frames per image) and keeps the BLE radio free for other use; BLE is the fallback, not the default, whenever WiFi is available. **Any WiFi failure — host unreachable, TCP connect fail, TLS handshake fail, or a mid-transfer drop — MUST fall back to BLE for that delivery** (WiFi is additive and every device is BLE-capable, D1); if BLE also fails, the delivery queues. This fallback is a **hard requirement, not best-effort** — the existing `MAX_DELIVERY_ATTEMPTS` retry loop re-resolves on the next attempt. Connection is opened **per delivery** and closed after the unit of work (§8 D6); a future persistent-with-idle-timer mode would be a host-side change only.
 - **H4 — lock**: keep the single per-MAC lock and hold it across **both** transports — this is the **permanent** model (one client at a time, §8 D5), not a phase-1 stopgap. No relaxation.
 - **H5 — provisioning service** `opendisplay.configure_wifi(device_id, ssid, password, …)`: connect over BLE, `provision_wifi()` (P5), then **reboot**; the tag reappears via mDNS if it joined. (Future: explicit join success/failure feedback — not in the initial release.)
@@ -246,12 +246,13 @@ Principle: **WiFi is a second transport under the existing MAC-keyed identity �
 2. py-opendisplay P1–P4 + P6 → release (minor, `[wifi]` extra).
 3. HA H1–H3 + H4(strict single lock) → pin bump.
    *Exit criteria:* a WiFi-enabled tag (encryption off) is discovered via zeroconf, merged onto its BLE entry, and `drawcustom` uploads over plaintext TCP/2446 with 4094-byte chunks (~17× fewer frames than BLE), falling back to BLE when WiFi is unreachable.
+   *Note:* the same-pipe / abort-on-disconnect firmware hardening (F4) lands in Phase 2. In Phase 1 the single HA client + per-delivery connections keep the risk of a stale cross-connection ACK low, but it is a **known gap until F4** — consider pulling F4's abort-on-disconnect forward if reconnect churn shows up in testing.
 
 **Phase 1b — TLS-PSK mode (2447):** Firmware serves TLS-PSK on 2447 when `encryption_enabled = 1` (mbedTLS + ECDHE-PSK, buffers tuned per the RAM doc); py-opendisplay TcpTransport connects TLS to 2447 when the advert says `tls=1` (HA targets Python 3.14+, so stdlib `ssl` PSK callbacks are used natively — no shim, §8 D7). The client picks port/mode from the advertised `tls` flag; no handshake on the plaintext path.
 
-**Future (post-initial) — Provisioning UX + live reconfig:** Firmware F3 (future opcodes for join-without-reboot + status feedback), py-opendisplay P5/P7, HA H5–H6. **Not part of the initial rollout** — the initial version provisions via config-write + reboot with mDNS discovery and no new opcodes (§8 D8).
+**Phase 2 — Correctness + power posture:** Firmware F4 (cross-transport eviction + same-pipe response routing + abort-on-disconnect) + F5 (power posture). No concurrency work — one client at a time is the permanent model (§8 D5).
 
-**Phase 3 — Power posture + polish:** Firmware F4 (cross-transport eviction + same-pipe response routing) + F5 (power posture). No concurrency work — one client at a time is the permanent model (§8 D5). Optional F6 (WiFi OTA).
+**Future / optional (post-initial):** *Provisioning UX + live reconfig* — Firmware F3 (future opcodes for join-without-reboot + status feedback), py-opendisplay P5/P7, HA H5–H6; **not in the initial rollout** (the initial version provisions via config-write + reboot with mDNS discovery and no new opcodes, §8 D8). *WiFi OTA* — optional F6.
 
 **Version coupling reminders:** HA `manifest.json` pins exact `py-opendisplay==`; a new py-opendisplay release precedes the HA changes. Header changes go through `sync_protocol_header.py --push/--check` into all four firmware copies (three of them only gain comments/constants they ignore).
 
@@ -268,7 +269,7 @@ Principle: **WiFi is a second transport under the existing MAC-keyed identity �
 
 ## 8. Open Design Decisions
 
-Decisions that still need an owner's call — distinct from the settled questions in §1 and the watch-items in §7's risk list. Each is tagged **RESOLVED** or **OPEN**.
+The design decisions and their resolutions — distinct from the settled questions in §1 and the watch-items in §7's risk list. **All are now RESOLVED**; the only outstanding item is D2's *execution* (implement + hardware-validate). See the Priority note at the end.
 
 ### D1 — WiFi-only devices — **RESOLVED: not planned**
 
@@ -302,7 +303,7 @@ Decisions that still need an owner's call — distinct from the settled question
 The device services **one client at a time across both transports** — no concurrent BLE+WiFi sessions, ever (not just v1). Both transports stay *available* (listening), but a connection on either **evicts** any active client on the other. Firm sub-rules:
 - A **request and its response travel over the same pipe** — the response is returned only on the transport the request arrived on, never fanned out to both (dual-delivery removed).
 - **Dropping a connection aborts its in-progress work** — the device aborts in-flight transfers, clears the session, and discards pending/queued responses, so a reconnecting client (even on the same transport) never receives an ACK for a command from the prior connection. Every operation is connection-scoped; responses are never replayed across connections.
-- Consequences: the single per-MAC host lock is the **permanent** model (H4); a single global firmware session suffices; F4 shrinks to cross-transport eviction + same-pipe response routing + abort-on-disconnect (no per-transport sessions); there is no "Phase 3 concurrency" — the goal is transport *choice*, not parallelism.
+- Consequences: the single per-MAC host lock is the **permanent** model (H4); a single global firmware session suffices; F4 shrinks to cross-transport eviction + same-pipe response routing + abort-on-disconnect (no per-transport sessions); there is no later-phase concurrency work — the goal is transport *choice*, not parallelism.
 
 ### D6 — Connection lifecycle — **RESOLVED: HA per-delivery; firmware allows persistent**
 
