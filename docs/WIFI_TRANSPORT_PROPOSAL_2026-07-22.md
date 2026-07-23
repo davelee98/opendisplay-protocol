@@ -115,7 +115,7 @@ Constants: `OD_LAN_TCP_PORT 2446` (plaintext), `OD_LAN_TLS_PORT 2447` (TLS-PSK),
 
 ### 3.3 Config + capability fields
 
-- **No new policy field.** WiFi mode is driven entirely by the **pre-existing** `SecurityConfig.encryption_enabled` (packet `0x27`): 0 → plaintext/2446, 1 → TLS-PSK/2447. (The earlier `0x2D network_policy` / `require_auth_on_ip` proposal is dropped — it is unnecessary once the existing flag selects the port/mode. If a keepalive interval is ever wanted, add it to `CMD_NET_CAPS`, not a new config packet.)
+- **No new policy field.** WiFi mode is driven entirely by the **pre-existing** `SecurityConfig.encryption_enabled` (packet `0x27`): 0 → plaintext/2446, 1 → TLS-PSK/2447. (The earlier `0x2D network_policy` / `require_auth_on_ip` proposal is dropped — it is unnecessary once the existing flag selects the port/mode. If a keepalive interval is ever wanted, make it a protocol constant or a config field — not a new opcode or config packet.)
 - `WifiConfig 0x26`: keep as the persistent credential store; comment-deprecate `server_host/server_port` back to reserved.
 - Transport capability lives in **`CommunicationModes`** (bit 2 exists; bits 3–7 free for e.g. WS) — **not** `device_flags` (hardware-init axis, wrong home).
 
@@ -266,7 +266,7 @@ Principle: **WiFi is a second transport under the existing MAC-keyed identity �
 ### Risks / open items
 
 - **PR #89 / `feat/tcp` `LANConnection`** is reference-only — implement `TcpTransport` from scratch, not a fork (§8 D9). Read the branch for ideas/gotchas first, then write fresh.
-- **Silent unknown-opcode drop** means capability probing is timeout-based on old firmware; clients must fall back cleanly (P5/H5 must handle "NET opcodes unsupported").
+- **Silent unknown-opcode drop** — relevant only to the **future** NET band, since the initial version adds no new opcodes. When the NET commands land, capability probing is timeout-based on older firmware, so clients must fall back cleanly (treat a NET-command timeout as "unsupported" → config-write+reboot).
 - **WiFi target scope is C6 + S3 only** (C3 excluded). This isn't enforced today — the only gate is `-DTARGET_ESP32`, which is set on the C3 envs too, so C3 currently compiles/serves WiFi. Add a dedicated `-DOPENDISPLAY_ENABLE_WIFI` on the S3/C6 envs and guard `wifi_service.cpp` on it, to enforce scope and reclaim RAM on C3.
 - **TLS on C6-N4 is an objective met by tuning (§8 D2), not a risk of infeasibility.** The *default* mbedTLS is marginal on C6-N4, but the trimmed build — applied uniformly on **all** WiFi targets (asymmetric IN/OUT record buffers, PSK-only, statically pre-allocated buffers) — fits in ~8–12 KB; the remaining work is on-hardware `largest_free_block` validation. The plaintext 2446 path has no such issue; S3's PSRAM makes TLS comfortable.
 - **No forced-encryption behavior change.** WiFi mode is opt-in via the pre-existing `encryption_enabled` flag; a tag left with encryption off serves plaintext 2446 exactly as an operator would expect. No existing deployment is forced into auth.
