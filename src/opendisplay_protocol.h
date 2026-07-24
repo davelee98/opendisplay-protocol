@@ -60,6 +60,17 @@
  *       receivers MUST reject len > 4094. Breaking only for senders that framed
  *       4095/4096-byte payloads (none deployed); max DIRECT_WRITE chunk data on
  *       LAN is now OD_LAN_MAX_PAYLOAD - 2 = 4092.
+ *     - BLE framing: add OD_BLE_MAX_FRAME (256) as the named BLE transport
+ *       ceiling -- the ATT MTU, counting opcode(1) + handle(2) + value, so the
+ *       usable single-write value is 253. This is the BLE peer of
+ *       OD_LAN_MAX_FRAME and codifies a limit the wire already had: PIPE_MAX_FRAME
+ *       (244) is the frame ceiling, and nRF peripherals are hard-capped at ATT MTU
+ *       247 (payload 244) by the SoftDevice. Peers SHOULD declare their GATT value
+ *       length and preferred MTU at OD_BLE_MAX_FRAME rather than the 512 ATT
+ *       maximum, so an oversize write draws ATT error 0x0D instead of being
+ *       silently dropped. Breaking only for peers that wrote >253 bytes in a
+ *       single GATT write (none deployed -- HA's GATT client caps at 244 and
+ *       rejects larger writes outright).
  *     - Add each further wire-spec change here as it lands. On the next version
  *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
@@ -862,6 +873,7 @@
 /* ==========================================================================
  * SECTION 7 -- CHUNK / SIZE BUDGETS
  * ========================================================================== */
+#define OD_BLE_MAX_FRAME               256u    /* max BLE ATT MTU: opcode(1) + handle(2) + value, inclusive; usable single-write value is OD_BLE_MAX_FRAME - 3 = 253 (BLE peer of OD_LAN_MAX_FRAME) */
 #define CONFIG_CHUNK_SIZE              200u    /* max config data bytes per chunk */
 #define CONFIG_CHUNK_SIZE_WITH_PREFIX  202u    /* first chunked CONFIG_WRITE payload: total(2) + 200 */
 #define MAX_CONFIG_CHUNKS              20u     /* upper bound on config chunks in a write */
